@@ -1,0 +1,250 @@
+use std::sync::LazyLock;
+
+use regex::Regex;
+use rust_decimal::{Decimal, prelude::Zero};
+
+static DATE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\d{4}-\d{2}-\d{2}"#).expect("hard coded regex is valid"));
+
+static DECIMAL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^-?\d+(\.\d+)?"#).expect("hard coded regex is valid"));
+
+static WHITESPACE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s+"#).expect("hard coded regex is valid"));
+
+// static _DATE_REGEX: LazyLock<Regex> =
+//     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
+//
+// static _DATE_REGEX: LazyLock<Regex> =
+//     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
+//
+// static _DATE_REGEX: LazyLock<Regex> =
+//     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
+//
+// static _DATE_REGEX: LazyLock<Regex> =
+//     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
+
+// When something goes wrong we show (up to) this many characters of the remaining unparsed input
+const MAX_ERROR_SAMPLE: usize = 10;
+
+#[derive(Debug, PartialEq)]
+pub struct TokenizeError(String);
+
+impl std::fmt::Display for TokenizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TokenizeError {}
+
+#[derive(Debug, PartialEq)]
+pub enum Token {
+    Date(String),
+    Decimal(Decimal),
+}
+
+pub struct Tokenizer {
+    buffer: String,
+    // The cursor represents a position between characters, not the character itself. For a string of
+    // length n there are n+1 valid cursor positions.
+    // - The cursor at position 0 refers to the start of the buffer (before the first character).
+    // - A cursor at position n refers to the position after the n-1th character (zero-indexed) and before the nth character.
+    // - A cursor at the end of the buffer (i.e., cursor == buffer.len()) is valid and refers to the position after the last character.
+    // Characters before the cursor have been processed those after have not.
+    cursor: usize,
+}
+
+impl Tokenizer {
+    pub fn new(raw: String) -> Self {
+        Tokenizer {
+            buffer: raw,
+            cursor: 0,
+        }
+    }
+
+    pub fn next_token(&mut self) -> Result<Option<Token>, TokenizeError> {
+        if self.cursor >= self.buffer.len() {
+            Ok(None)
+        } else if let Some(whitespace) = WHITESPACE_REGEX.find(&self.buffer[self.cursor..]) {
+            self.cursor += whitespace.end();
+            self.next_token()
+        } else if let Some(date) = DATE_REGEX.find(&self.buffer[self.cursor..]) {
+            self.cursor += date.end();
+            let date = date.as_str();
+            Ok(Some(Token::Date(date.to_string())))
+        } else if let Some(decimal) = DECIMAL_REGEX.find(&self.buffer[self.cursor..]) {
+            let Ok(parsed_decimal) = decimal.as_str().parse() else {
+                let (line, column) = self.current_line_column();
+                return Err(TokenizeError(format!(
+                    "decimal {} on line {}, column {} has too many digits",
+                    decimal.as_str(),
+                    line,
+                    column
+                )));
+            };
+            self.cursor += decimal.end();
+            Ok(Some(Token::Decimal(parsed_decimal)))
+        } else {
+            let end = self.cursor + MAX_ERROR_SAMPLE;
+            let (endstr, end) = if end < self.buffer.len() {
+                ("...", end)
+            } else {
+                ("", self.buffer.len())
+            };
+            let (line, column) = self.current_line_column();
+            Err(TokenizeError(format!(
+                "unexpected character sequence {}{} on line {}, column {}",
+                &self.buffer[self.cursor..end],
+                endstr,
+                line,
+                column
+            )))
+        }
+    }
+
+    /// Returns the current one-indexed line number and column of the cursor as a (line_number, column) tuple.
+    fn current_line_column(&self) -> (usize, usize) {
+        (self.current_line(), self.current_column())
+    }
+
+    /// Returns the current one-indexed line number of the cursor. If the cursor is at the start
+    /// of the buffer then it's on line one. Every newline character represents an increment of one
+    /// in the line count - this includes cases where the last character is a newline and the
+    /// cursor increments to the end of the buffer.
+    fn current_line(&self) -> usize {
+        if self.cursor.is_zero() {
+            // If the cursor is at zero i.e. the start of the buffer then below we would calculate
+            // "".lines().count() as zero. However we want to count the start of the buffer as line
+            // one.
+            1
+        } else {
+            let lines = self.buffer[0..self.cursor].lines().count();
+
+            // There's a nasty edge case here. If the string ends in a newline then the lines()
+            // method doesn't return an empty line after the last newline. This means the line
+            // count is one less than we expect (since the cursor is beyond the last newline we
+            // want to count it as being on the next line) e.g.
+            // "hello\n".lines().count() returns one whereas we expect this to count as two lines.
+            // We check for this case and fix accordingly.
+            if self.buffer[0..self.cursor].ends_with("\n") {
+                lines + 1
+            } else {
+                lines
+            }
+        }
+    }
+
+    /// Returns the one-indexed column of the cursor. If the cursor is at the start of the buffer then
+    /// it's at column one. Each increment of the cursor position increments the column number.
+    /// When a newline character is crossed the column counter resets to one.
+    fn current_column(&self) -> usize {
+        if self.cursor.is_zero() {
+            // If the cursor is at zero then `line_start` below would be zero and so the returned
+            // value would also be zero. However if the cursor is at the start of the buffer then
+            // it's by definition at column one. So we override for this edge case.
+            1
+        } else {
+            // Find the start index of the current line.
+            let line_start_index = self.buffer[..self.cursor].rfind('\n').unwrap_or(0); // or start of buffer
+            // If the cursor has value n then the character before the cursor has index n-1
+            // (think of the base case where the cursor has value one then the single character
+            // before it has index zero). So if the cursor is immediately to the right of a newline
+            // character the line_start_index will be one less than the cursor value. Subtraction
+            // would then give a value of one which is the correct column value.
+            self.cursor - line_start_index
+        }
+    }
+
+    #[cfg(test)]
+    fn set_cursor(&mut self, pos: usize) {
+        self.cursor = pos;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn it_works() {
+        let mut tokenizer = Tokenizer::new("2023-02-01 1.2334343".to_string());
+        assert_eq!(
+            tokenizer.next_token().expect("should return OK"),
+            Some(Token::Date("2023-02-01".to_string()))
+        );
+
+        assert_eq!(
+            tokenizer.next_token().expect("should return OK"),
+            Some(Token::Decimal(
+                "1.2334343".parse().expect("hard coded string is valid")
+            ))
+        );
+
+        assert!(tokenizer.next_token().expect("should return OK").is_none())
+    }
+
+    #[test]
+    fn ensure_error_when_decimal_too_many_digits() {
+        let mut tokenizer = Tokenizer::new("79228162514264337593543950336".to_string());
+
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError(
+                "decimal 79228162514264337593543950336 on line 1, column 1 has too many digits"
+                    .to_string()
+            )
+        )
+    }
+
+    #[test]
+    fn ensure_error_when_invalid_input() {
+        let mut tokenizer = Tokenizer::new("@123sds".to_string());
+
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError("unexpected character sequence @123sds on line 1, column 1".to_string())
+        )
+    }
+
+    #[test]
+    fn ensure_error_when_invalid_input_v2() {
+        // Here we ensure that if the sample is truncated properly if the remaining unparsed string
+        // is too long and starts at the correct place
+        let mut tokenizer = Tokenizer::new("1.2345 \n @123sdsabcd".to_string());
+        tokenizer.next_token().expect("the 1.2345 should parse ok");
+
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError(
+                "unexpected character sequence @123sdsabc... on line 2, column 2".to_string()
+            )
+        )
+    }
+
+    #[test]
+    fn test_cursor_position() {
+        let test = "hello\n".lines().count();
+        println!("number: {}", test);
+
+        let mut tokenizer = Tokenizer::new("".to_string());
+        tokenizer.set_cursor(0);
+        assert_eq!(tokenizer.current_line_column(), (1, 1));
+
+        let mut tokenizer = Tokenizer::new("hello".to_string());
+        tokenizer.set_cursor(0);
+        assert_eq!(tokenizer.current_line_column(), (1, 1));
+
+        let mut tokenizer = Tokenizer::new("hello\n\n".to_string());
+        tokenizer.set_cursor(7);
+        assert_eq!(tokenizer.current_line_column(), (3, 1));
+
+        let mut tokenizer = Tokenizer::new("hello\n\n".to_string());
+        tokenizer.set_cursor(6);
+        assert_eq!(tokenizer.current_line_column(), (2, 1));
+
+        let mut tokenizer = Tokenizer::new("hello\nworld".to_string());
+        tokenizer.set_cursor(7);
+        assert_eq!(tokenizer.current_line_column(), (2, 2));
+    }
+}
