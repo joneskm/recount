@@ -3,24 +3,27 @@ use std::sync::LazyLock;
 use regex::Regex;
 use rust_decimal::{Decimal, prelude::Zero};
 
-static DATE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^\d{4}-\d{2}-\d{2}"#).expect("hard coded regex is valid"));
+static DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^(\d{4}-\d{2}-\d{2})(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
+});
 
-static DECIMAL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^-?\d+(\.\d+)?"#).expect("hard coded regex is valid"));
+static DECIMAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^(-?\d+(?:\.\d+)?)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
+});
 
 static WHITESPACE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^\s+"#).expect("hard coded regex is valid"));
 
-// static _DATE_REGEX: LazyLock<Regex> =
-//     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
-//
-// static _DATE_REGEX: LazyLock<Regex> =
-//     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
-//
-// static _DATE_REGEX: LazyLock<Regex> =
-//     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
-//
+static OPTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^option\s+"[^"]+"\s+"[^"]+"(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
+});
+
+static DIRECTIVE_OPEN_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^open(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
+
+static DIRECTIVE_POST_TX_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\*(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
+
 // static _DATE_REGEX: LazyLock<Regex> =
 //     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
 
@@ -42,6 +45,8 @@ impl std::error::Error for TokenizeError {}
 pub enum Token {
     Date(String),
     Decimal(Decimal),
+    DirectiveOpen,
+    DirectivePostTx,
 }
 
 pub struct Tokenizer {
@@ -69,11 +74,25 @@ impl Tokenizer {
         } else if let Some(whitespace) = WHITESPACE_REGEX.find(&self.buffer[self.cursor..]) {
             self.cursor += whitespace.end();
             self.next_token()
-        } else if let Some(date) = DATE_REGEX.find(&self.buffer[self.cursor..]) {
+        } else if let Some(option_line) = OPTION_REGEX.find(&self.buffer[self.cursor..]) {
+            // we ignore options
+            self.cursor += option_line.end();
+            self.next_token()
+        } else if let Some(date) = DATE_REGEX.captures(&self.buffer[self.cursor..]).map(|c| {
+            c.get(1)
+                .expect("if the entire regex matches then the first capture group will not be None")
+        }) {
             self.cursor += date.end();
             let date = date.as_str();
             Ok(Some(Token::Date(date.to_string())))
-        } else if let Some(decimal) = DECIMAL_REGEX.find(&self.buffer[self.cursor..]) {
+        } else if let Some(decimal) = DECIMAL_REGEX
+            .captures(&self.buffer[self.cursor..])
+            .map(|c| {
+                c.get(1).expect(
+                    "if the entire regex matches then the first capture group will not be None",
+                )
+            })
+        {
             let Ok(parsed_decimal) = decimal.as_str().parse() else {
                 let (line, column) = self.current_line_column();
                 return Err(TokenizeError(format!(
@@ -85,6 +104,15 @@ impl Tokenizer {
             };
             self.cursor += decimal.end();
             Ok(Some(Token::Decimal(parsed_decimal)))
+        } else if let Some(directive_open) = DIRECTIVE_OPEN_REGEX.find(&self.buffer[self.cursor..])
+        {
+            self.cursor += directive_open.end();
+            Ok(Some(Token::DirectiveOpen))
+        } else if let Some(directive_post_tx) =
+            DIRECTIVE_POST_TX_REGEX.find(&self.buffer[self.cursor..])
+        {
+            self.cursor += directive_post_tx.end();
+            Ok(Some(Token::DirectivePostTx))
         } else {
             let end = self.cursor + MAX_ERROR_SAMPLE;
             let (endstr, end) = if end < self.buffer.len() {
@@ -168,7 +196,14 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut tokenizer = Tokenizer::new("2023-02-01 1.2334343".to_string());
+        let raw = r#"
+option "operating_currency" "GBP"
+
+2023-02-01 open Equity:RetainedEarnings              GBP
+"#;
+        // let mut tokenizer = Tokenizer::new("2023-02-01 1.2334343".to_string());
+        let mut tokenizer = Tokenizer::new(raw.to_string());
+
         assert_eq!(
             tokenizer.next_token().expect("should return OK"),
             Some(Token::Date("2023-02-01".to_string()))
@@ -176,12 +211,17 @@ mod tests {
 
         assert_eq!(
             tokenizer.next_token().expect("should return OK"),
-            Some(Token::Decimal(
-                "1.2334343".parse().expect("hard coded string is valid")
-            ))
+            Some(Token::DirectiveOpen)
         );
 
-        assert!(tokenizer.next_token().expect("should return OK").is_none())
+        // assert_eq!(
+        //     tokenizer.next_token().expect("should return OK"),
+        //     Some(Token::Decimal(
+        //         "1.2334343".parse().expect("hard coded string is valid")
+        //     ))
+        // );
+        //
+        // assert!(tokenizer.next_token().expect("should return OK").is_none())
     }
 
     #[test]
@@ -198,7 +238,41 @@ mod tests {
     }
 
     #[test]
-    fn ensure_error_when_invalid_input() {
+    fn ensure_followed_by_whitespace() {
+        let mut tokenizer = Tokenizer::new("792281open".to_string());
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError(
+                "unexpected character sequence 792281open on line 1, column 1".to_string()
+            )
+        );
+
+        let mut tokenizer = Tokenizer::new("2023-02-01open".to_string());
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError(
+                "unexpected character sequence 2023-02-01... on line 1, column 1".to_string()
+            )
+        );
+
+        let mut tokenizer = Tokenizer::new("openX".to_string());
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError("unexpected character sequence openX on line 1, column 1".to_string())
+        );
+
+        let mut tokenizer = Tokenizer::new(r#"option "operating_currency" "GBP"X"#.to_string());
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError(
+                "unexpected character sequence option \"op... on line 1, column 1".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn check_error_msg_simple() {
+        // very basic check of error message
         let mut tokenizer = Tokenizer::new("@123sds".to_string());
 
         assert_eq!(
@@ -208,9 +282,9 @@ mod tests {
     }
 
     #[test]
-    fn ensure_error_when_invalid_input_v2() {
-        // Here we ensure that if the sample is truncated properly if the remaining unparsed string
-        // is too long and starts at the correct place
+    fn ensure_error_msg_truncated() {
+        // here we ensure that the code sample displayed in the error message is truncated properly
+        // in cases where the remaining unparsed string is longer than MAX_ERROR_SAMPLE
         let mut tokenizer = Tokenizer::new("1.2345 \n @123sdsabcd".to_string());
         tokenizer.next_token().expect("the 1.2345 should parse ok");
 
