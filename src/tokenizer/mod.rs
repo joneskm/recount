@@ -24,8 +24,16 @@ static DIRECTIVE_OPEN_REGEX: LazyLock<Regex> =
 static DIRECTIVE_POST_TX_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^\*(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
 
-// static _DATE_REGEX: LazyLock<Regex> =
-//     LazyLock::new(|| Regex::new("[0-9a-f]+").expect("hard coded regex is valid"));
+static ACCOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^(Assets|Liabilities|Expenses|Income|Equity):([A-Z][A-Za-z]+)(?:[ \t\n\r]|$)"#)
+        .expect("hard coded regex is valid")
+});
+
+static CURRENCY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^([A-Z]+)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
+
+static COMMENT_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^;.*(?:\r?\n|$)"#).expect("hard coded regex is valid"));
 
 // When something goes wrong we show (up to) this many characters of the remaining unparsed input
 const MAX_ERROR_SAMPLE: usize = 10;
@@ -47,6 +55,17 @@ pub enum Token {
     Decimal(Decimal),
     DirectiveOpen,
     DirectivePostTx,
+    Account(Account),
+    Currency(String),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Account {
+    Equity(String),
+    Liabilities(String),
+    Assets(String),
+    Income(String),
+    Expenses(String),
 }
 
 pub struct Tokenizer {
@@ -77,6 +96,10 @@ impl Tokenizer {
         } else if let Some(option_line) = OPTION_REGEX.find(&self.buffer[self.cursor..]) {
             // we ignore options
             self.cursor += option_line.end();
+            self.next_token()
+        } else if let Some(comment) = COMMENT_REGEX.find(&self.buffer[self.cursor..]) {
+            // we ignore comments
+            self.cursor += comment.end();
             self.next_token()
         } else if let Some(date) = DATE_REGEX.captures(&self.buffer[self.cursor..]).map(|c| {
             c.get(1)
@@ -113,6 +136,44 @@ impl Tokenizer {
         {
             self.cursor += directive_post_tx.end();
             Ok(Some(Token::DirectivePostTx))
+        } else if let Some(full_account) = ACCOUNT_REGEX.captures(&self.buffer[self.cursor..]) {
+            self.cursor += full_account
+                .get(0)
+                .expect("when i == 0, this is guaranteed to return a non-None value")
+                .end();
+            let acct_type = full_account
+                .get(1)
+                .expect("if there was a match there will be a 1 capture group")
+                .as_str();
+
+            let acct_name = full_account
+                .get(2)
+                .expect("if there was a match there will be a 2 capture group")
+                .as_str();
+
+            match acct_type {
+                "Assets" => Ok(Some(Token::Account(Account::Assets(acct_name.to_string())))),
+                "Equity" => Ok(Some(Token::Account(Account::Equity(acct_name.to_string())))),
+                "Income" => Ok(Some(Token::Account(Account::Income(acct_name.to_string())))),
+                "Expenses" => Ok(Some(Token::Account(Account::Expenses(
+                    acct_name.to_string(),
+                )))),
+                "Liabilities" => Ok(Some(Token::Account(Account::Liabilities(
+                    acct_name.to_string(),
+                )))),
+                _ => unreachable!("the regex forces one of the above"),
+            }
+        } else if let Some(currency) =
+            CURRENCY_REGEX
+                .captures(&self.buffer[self.cursor..])
+                .map(|c| {
+                    c.get(1).expect(
+                        "if the entire regex matches then the first capture group will not be None",
+                    )
+                })
+        {
+            self.cursor += currency.end();
+            Ok(Some(Token::Currency(currency.as_str().to_string())))
         } else {
             let end = self.cursor + MAX_ERROR_SAMPLE;
             let (endstr, end) = if end < self.buffer.len() {
@@ -200,8 +261,15 @@ mod tests {
 option "operating_currency" "GBP"
 
 2023-02-01 open Equity:RetainedEarnings              GBP
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; An account entry
+
+2023-02-03 * "A comment"
+  Assets:AnAsset                                   12 USD @ 0.82 GBP
+  Income:SomeIncome                                     -9.84 GBP
 "#;
-        // let mut tokenizer = Tokenizer::new("2023-02-01 1.2334343".to_string());
+
         let mut tokenizer = Tokenizer::new(raw.to_string());
 
         assert_eq!(
@@ -214,13 +282,18 @@ option "operating_currency" "GBP"
             Some(Token::DirectiveOpen)
         );
 
-        // assert_eq!(
-        //     tokenizer.next_token().expect("should return OK"),
-        //     Some(Token::Decimal(
-        //         "1.2334343".parse().expect("hard coded string is valid")
-        //     ))
-        // );
-        //
+        assert_eq!(
+            tokenizer.next_token().expect("should return OK"),
+            Some(Token::Account(Account::Equity(
+                "RetainedEarnings".to_string()
+            )))
+        );
+
+        assert_eq!(
+            tokenizer.next_token().expect("should return OK"),
+            Some(Token::Currency("GBP".to_string()))
+        );
+
         // assert!(tokenizer.next_token().expect("should return OK").is_none())
     }
 
@@ -239,6 +312,7 @@ option "operating_currency" "GBP"
 
     #[test]
     fn ensure_followed_by_whitespace() {
+        // Ensures that tokens are followed by whitespace.
         let mut tokenizer = Tokenizer::new("792281open".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
@@ -266,6 +340,17 @@ option "operating_currency" "GBP"
             tokenizer.next_token().unwrap_err(),
             TokenizeError(
                 "unexpected character sequence option \"op... on line 1, column 1".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn account_name_capitalized() {
+        let mut tokenizer = Tokenizer::new(r#"Assets:nOtCapitalized"#.to_string());
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError(
+                "unexpected character sequence Assets:nOt... on line 1, column 1".to_string()
             )
         );
     }
