@@ -79,6 +79,7 @@ pub enum Token {
     At,
     Newline,
     OptionLine,
+    TxDescription,
 }
 
 #[derive(Debug, PartialEq)]
@@ -221,9 +222,8 @@ impl Tokenizer {
                 )
             })
         {
-            // we ignore tx descriptions TODO: don't ignore
             self.cursor += tx_description.end();
-            self.next_token()
+            Ok(Some(Token::TxDescription))
         } else if let Some(at) = AT_REGEX.captures(&self.buffer[self.cursor..]).map(|c| {
             c.get(1)
                 .expect("if the entire regex matches then the first capture group will not be None")
@@ -366,6 +366,8 @@ mod tests {
         );
 
         assert_eq!(tokenizer.next_token(), Ok(Some(Token::DirectivePostTx)));
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::TxDescription)));
 
         assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
 
