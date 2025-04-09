@@ -3,8 +3,6 @@ use std::sync::LazyLock;
 use regex::Regex;
 use rust_decimal::{Decimal, prelude::Zero};
 
-//TODO: enforce empty lines
-
 static DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^(\d{4}-\d{2}-\d{2})(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
 });
@@ -15,17 +13,18 @@ static AMOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static WHITESPACE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^\s+"#).expect("hard coded regex is valid"));
+    LazyLock::new(|| Regex::new(r#"^[ \t]+"#).expect("hard coded regex is valid"));
 
 static OPTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^option\s+"[^"]+"\s+"[^"]+"(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
+    Regex::new(r#"^(option\s+"[^"]+"\s+"[^"]+")(?:[ \t\n\r]|$)"#)
+        .expect("hard coded regex is valid")
 });
 
 static DIRECTIVE_OPEN_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^open(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
+    LazyLock::new(|| Regex::new(r#"^(open)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
 
 static DIRECTIVE_POST_TX_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^\*(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
+    LazyLock::new(|| Regex::new(r#"^(\*)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
 
 static ACCOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^(Assets|Liabilities|Expenses|Income|Equity):([A-Z][A-Za-z]+)(?:[ \t\n\r]|$)"#)
@@ -35,6 +34,7 @@ static ACCOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static CURRENCY_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^([A-Z]+)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
 
+// we consume the newline at the end of a comment because it's part of the definition
 static COMMENT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^;.*(?:\r?\n|$)"#).expect("hard coded regex is valid"));
 
@@ -44,6 +44,9 @@ static TX_DESCRIPTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 
 static AT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^(@)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
+
+static NEWLINE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\r?\n"#).expect("hard coded regex is valid"));
 
 // When something goes wrong we show (up to) this many characters of the remaining unparsed input
 const MAX_ERROR_SAMPLE: usize = 10;
@@ -74,6 +77,7 @@ pub enum Token {
     Account(Account),
     Currency(String),
     At,
+    Newline,
 }
 
 #[derive(Debug, PartialEq)]
@@ -110,8 +114,14 @@ impl Tokenizer {
         } else if let Some(whitespace) = WHITESPACE_REGEX.find(&self.buffer[self.cursor..]) {
             self.cursor += whitespace.end();
             self.next_token()
-        } else if let Some(option_line) = OPTION_REGEX.find(&self.buffer[self.cursor..]) {
-            // we ignore options
+        } else if let Some(option_line) =
+            OPTION_REGEX.captures(&self.buffer[self.cursor..]).map(|c| {
+                c.get(1).expect(
+                    "if the entire regex matches then the first capture group will not be None",
+                )
+            })
+        {
+            // we ignore options TODO: don't ignore
             self.cursor += option_line.end();
             self.next_token()
         } else if let Some(comment) = COMMENT_REGEX.find(&self.buffer[self.cursor..]) {
@@ -142,28 +152,32 @@ impl Tokenizer {
                     column
                 )));
             };
-            self.cursor += captures
-                .get(0)
-                .expect("when i == 0, this is guaranteed to return a non-None value")
-                .end();
+            self.cursor += currency.end();
             Ok(Some(Token::Amount(Amount {
                 currency: currency.as_str().to_string(),
                 amount,
             })))
-        } else if let Some(directive_open) = DIRECTIVE_OPEN_REGEX.find(&self.buffer[self.cursor..])
+        } else if let Some(directive_open) = DIRECTIVE_OPEN_REGEX
+            .captures(&self.buffer[self.cursor..])
+            .map(|c| {
+                c.get(1).expect(
+                    "if the entire regex matches then the first capture group will not be None",
+                )
+            })
         {
             self.cursor += directive_open.end();
             Ok(Some(Token::DirectiveOpen))
-        } else if let Some(directive_post_tx) =
-            DIRECTIVE_POST_TX_REGEX.find(&self.buffer[self.cursor..])
+        } else if let Some(directive_post_tx) = DIRECTIVE_POST_TX_REGEX
+            .captures(&self.buffer[self.cursor..])
+            .map(|c| {
+                c.get(1).expect(
+                    "if the entire regex matches then the first capture group will not be None",
+                )
+            })
         {
             self.cursor += directive_post_tx.end();
             Ok(Some(Token::DirectivePostTx))
         } else if let Some(full_account) = ACCOUNT_REGEX.captures(&self.buffer[self.cursor..]) {
-            self.cursor += full_account
-                .get(0)
-                .expect("when i == 0, this is guaranteed to return a non-None value")
-                .end();
             let acct_type = full_account
                 .get(1)
                 .expect("if there was a match there will be a 1 capture group")
@@ -171,8 +185,10 @@ impl Tokenizer {
 
             let acct_name = full_account
                 .get(2)
-                .expect("if there was a match there will be a 2 capture group")
-                .as_str();
+                .expect("if there was a match there will be a 2 capture group");
+
+            self.cursor += acct_name.end();
+            let acct_name = acct_name.as_str();
 
             match acct_type {
                 "Assets" => Ok(Some(Token::Account(Account::Assets(acct_name.to_string())))),
@@ -197,14 +213,26 @@ impl Tokenizer {
         {
             self.cursor += currency.end();
             Ok(Some(Token::Currency(currency.as_str().to_string())))
-        } else if let Some(tx_description) = TX_DESCRIPTION_REGEX.find(&self.buffer[self.cursor..])
+        } else if let Some(tx_description) = TX_DESCRIPTION_REGEX
+            .captures(&self.buffer[self.cursor..])
+            .map(|c| {
+                c.get(1).expect(
+                    "if the entire regex matches then the first capture group will not be None",
+                )
+            })
         {
-            // we ignore tx descriptions
+            // we ignore tx descriptions TODO: don't ignore
             self.cursor += tx_description.end();
             self.next_token()
-        } else if let Some(at) = AT_REGEX.find(&self.buffer[self.cursor..]) {
+        } else if let Some(at) = AT_REGEX.captures(&self.buffer[self.cursor..]).map(|c| {
+            c.get(1)
+                .expect("if the entire regex matches then the first capture group will not be None")
+        }) {
             self.cursor += at.end();
             Ok(Some(Token::At))
+        } else if let Some(newline) = NEWLINE_REGEX.find(&self.buffer[self.cursor..]) {
+            self.cursor += newline.end();
+            Ok(Some(Token::Newline))
         } else {
             let end = self.cursor + MAX_ERROR_SAMPLE;
             let (endstr, end) = if end < self.buffer.len() {
@@ -288,8 +316,7 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let raw = r#"
-option "operating_currency" "GBP"
+        let raw = r#"option "operating_currency" "GBP"
 
 2023-02-01 open Equity:RetainedEarnings              GBP
 
@@ -298,10 +325,23 @@ option "operating_currency" "GBP"
 
 2023-02-03 * "Transaction description"
   Assets:AnAsset                                   12 USD @ 0.82 GBP
-  Income:SomeIncome                                     -9,000.84 GBP
-"#;
+  Income:SomeIncome                                     -9,000.84 GBP"#;
 
         let mut tokenizer = Tokenizer::new(raw.to_string());
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("the next token is Token::Newline"),
+            Some(Token::Newline),
+        );
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("the next token is Token::Newline"),
+            Some(Token::Newline),
+        );
 
         assert_eq!(
             tokenizer.next_token().expect("should return OK"),
@@ -326,6 +366,27 @@ option "operating_currency" "GBP"
         );
 
         assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("the next token is Token::Newline"),
+            Some(Token::Newline),
+        );
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("the next token is Token::Newline"),
+            Some(Token::Newline),
+        );
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("the next token is Token::Newline"),
+            Some(Token::Newline),
+        );
+
+        assert_eq!(
             tokenizer.next_token().expect("should return OK"),
             Some(Token::Date("2023-02-03".to_string()))
         );
@@ -333,6 +394,13 @@ option "operating_currency" "GBP"
         assert_eq!(
             tokenizer.next_token().expect("should return OK"),
             Some(Token::DirectivePostTx)
+        );
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("the next token is Token::Newline"),
+            Some(Token::Newline),
         );
 
         assert_eq!(
@@ -366,6 +434,14 @@ option "operating_currency" "GBP"
                 amount: "0.82".parse().expect("hard coded value is a valid decimal")
             }))
         );
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("the next token is Token::Newline"),
+            Some(Token::Newline),
+        );
+
         assert_eq!(
             tokenizer.next_token().expect("should return OK"),
             Some(Token::Account(Account::Income("SomeIncome".to_string())))
@@ -474,6 +550,10 @@ option "operating_currency" "GBP"
         tokenizer
             .next_token()
             .expect("the 1.2345GBP should parse ok");
+
+        tokenizer
+            .next_token()
+            .expect("the newline and whitespace should parse ok");
 
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
