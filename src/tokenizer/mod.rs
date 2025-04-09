@@ -35,6 +35,10 @@ static CURRENCY_REGEX: LazyLock<Regex> =
 static COMMENT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^;.*(?:\r?\n|$)"#).expect("hard coded regex is valid"));
 
+static TX_DESCRIPTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^("[^"]+")(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
+});
+
 // When something goes wrong we show (up to) this many characters of the remaining unparsed input
 const MAX_ERROR_SAMPLE: usize = 10;
 
@@ -174,6 +178,11 @@ impl Tokenizer {
         {
             self.cursor += currency.end();
             Ok(Some(Token::Currency(currency.as_str().to_string())))
+        } else if let Some(tx_description) = TX_DESCRIPTION_REGEX.find(&self.buffer[self.cursor..])
+        {
+            // we ignore tx descriptions
+            self.cursor += tx_description.end();
+            self.next_token()
         } else {
             let end = self.cursor + MAX_ERROR_SAMPLE;
             let (endstr, end) = if end < self.buffer.len() {
@@ -265,7 +274,7 @@ option "operating_currency" "GBP"
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; An account entry
 
-2023-02-03 * "A comment"
+2023-02-03 * "Transaction description"
   Assets:AnAsset                                   12 USD @ 0.82 GBP
   Income:SomeIncome                                     -9.84 GBP
 "#;
@@ -294,6 +303,20 @@ option "operating_currency" "GBP"
             Some(Token::Currency("GBP".to_string()))
         );
 
+        assert_eq!(
+            tokenizer.next_token().expect("should return OK"),
+            Some(Token::Date("2023-02-03".to_string()))
+        );
+
+        assert_eq!(
+            tokenizer.next_token().expect("should return OK"),
+            Some(Token::DirectivePostTx)
+        );
+
+        assert_eq!(
+            tokenizer.next_token().expect("should return OK"),
+            Some(Token::Account(Account::Assets("AnAsset".to_string())))
+        );
         // assert!(tokenizer.next_token().expect("should return OK").is_none())
     }
 
