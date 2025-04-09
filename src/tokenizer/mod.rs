@@ -7,8 +7,10 @@ static DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^(\d{4}-\d{2}-\d{2})(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
 });
 
-static DECIMAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^(-?\d+(?:\.\d+)?)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
+// TODO: commas e.g. 1,300.00
+static AMOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"^(-?\d+(?:\.\d+)?)(?:[ \t]*)([A-Z]+)(?:[ \t\n\r]|$)"#)
+        .expect("hard coded regex is valid")
 });
 
 static WHITESPACE_REGEX: LazyLock<Regex> =
@@ -39,6 +41,9 @@ static TX_DESCRIPTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^("[^"]+")(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
 });
 
+static AT_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^(@)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
+
 // When something goes wrong we show (up to) this many characters of the remaining unparsed input
 const MAX_ERROR_SAMPLE: usize = 10;
 
@@ -54,13 +59,20 @@ impl std::fmt::Display for TokenizeError {
 impl std::error::Error for TokenizeError {}
 
 #[derive(Debug, PartialEq)]
+pub struct Amount {
+    currency: String,
+    amount: Decimal,
+}
+
+#[derive(Debug, PartialEq)]
 pub enum Token {
     Date(String),
-    Decimal(Decimal),
+    Amount(Amount),
     DirectiveOpen,
     DirectivePostTx,
     Account(Account),
     Currency(String),
+    At,
 }
 
 #[derive(Debug, PartialEq)]
@@ -112,25 +124,30 @@ impl Tokenizer {
             self.cursor += date.end();
             let date = date.as_str();
             Ok(Some(Token::Date(date.to_string())))
-        } else if let Some(decimal) = DECIMAL_REGEX
-            .captures(&self.buffer[self.cursor..])
-            .map(|c| {
-                c.get(1).expect(
-                    "if the entire regex matches then the first capture group will not be None",
-                )
-            })
-        {
-            let Ok(parsed_decimal) = decimal.as_str().parse() else {
+        } else if let Some(captures) = AMOUNT_REGEX.captures(&self.buffer[self.cursor..]) {
+            let amount = captures
+                .get(1)
+                .expect("if there was a match there will be a 1 capture group");
+            let currency = captures
+                .get(2)
+                .expect("if there was a match there will be a 1 capture group");
+            let Ok(amount) = amount.as_str().parse() else {
                 let (line, column) = self.current_line_column();
                 return Err(TokenizeError(format!(
                     "decimal {} on line {}, column {} has too many digits",
-                    decimal.as_str(),
+                    amount.as_str(),
                     line,
                     column
                 )));
             };
-            self.cursor += decimal.end();
-            Ok(Some(Token::Decimal(parsed_decimal)))
+            self.cursor += captures
+                .get(0)
+                .expect("when i == 0, this is guaranteed to return a non-None value")
+                .end();
+            Ok(Some(Token::Amount(Amount {
+                currency: currency.as_str().to_string(),
+                amount,
+            })))
         } else if let Some(directive_open) = DIRECTIVE_OPEN_REGEX.find(&self.buffer[self.cursor..])
         {
             self.cursor += directive_open.end();
@@ -183,6 +200,9 @@ impl Tokenizer {
             // we ignore tx descriptions
             self.cursor += tx_description.end();
             self.next_token()
+        } else if let Some(at) = AT_REGEX.find(&self.buffer[self.cursor..]) {
+            self.cursor += at.end();
+            Ok(Some(Token::At))
         } else {
             let end = self.cursor + MAX_ERROR_SAMPLE;
             let (endstr, end) = if end < self.buffer.len() {
@@ -317,12 +337,61 @@ option "operating_currency" "GBP"
             tokenizer.next_token().expect("should return OK"),
             Some(Token::Account(Account::Assets("AnAsset".to_string())))
         );
-        // assert!(tokenizer.next_token().expect("should return OK").is_none())
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("cursor is at 12 USD which is a valid Token::Amount"),
+            Some(Token::Amount(Amount {
+                currency: "USD".to_string(),
+                amount: "12".parse().expect("hard coded value is a valid decimal")
+            }))
+        );
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("cursor is at @ which is a valid Token::At"),
+            Some(Token::At)
+        );
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("cursor is at 0.82 GBP which is a valid Token::Amount"),
+            Some(Token::Amount(Amount {
+                currency: "GBP".to_string(),
+                amount: "0.82".parse().expect("hard coded value is a valid decimal")
+            }))
+        );
+        assert_eq!(
+            tokenizer.next_token().expect("should return OK"),
+            Some(Token::Account(Account::Income("SomeIncome".to_string())))
+        );
+
+        assert_eq!(
+            tokenizer
+                .next_token()
+                .expect("cursor is at -9.84 GBP which is a valid Token::Amount"),
+            Some(Token::Amount(Amount {
+                currency: "GBP".to_string(),
+                amount: "-9.84"
+                    .parse()
+                    .expect("hard coded value is a valid decimal")
+            }))
+        );
+
+        assert!(
+            tokenizer
+                .next_token()
+                .expect("cursor is at the end of file so it should return with no error")
+                .is_none()
+        );
     }
 
     #[test]
     fn ensure_error_when_decimal_too_many_digits() {
-        let mut tokenizer = Tokenizer::new("79228162514264337593543950336".to_string());
+        let mut tokenizer = Tokenizer::new("79228162514264337593543950336GBP".to_string());
 
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
@@ -336,11 +405,11 @@ option "operating_currency" "GBP"
     #[test]
     fn ensure_followed_by_whitespace() {
         // Ensures that tokens are followed by whitespace.
-        let mut tokenizer = Tokenizer::new("792281open".to_string());
+        let mut tokenizer = Tokenizer::new("792281USDopen".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError(
-                "unexpected character sequence 792281open on line 1, column 1".to_string()
+                "unexpected character sequence 792281USDo... on line 1, column 1".to_string()
             )
         );
 
@@ -364,6 +433,12 @@ option "operating_currency" "GBP"
             TokenizeError(
                 "unexpected character sequence option \"op... on line 1, column 1".to_string()
             )
+        );
+
+        let mut tokenizer = Tokenizer::new("@X".to_string());
+        assert_eq!(
+            tokenizer.next_token().unwrap_err(),
+            TokenizeError("unexpected character sequence @X on line 1, column 1".to_string())
         );
     }
 
@@ -393,8 +468,10 @@ option "operating_currency" "GBP"
     fn ensure_error_msg_truncated() {
         // here we ensure that the code sample displayed in the error message is truncated properly
         // in cases where the remaining unparsed string is longer than MAX_ERROR_SAMPLE
-        let mut tokenizer = Tokenizer::new("1.2345 \n @123sdsabcd".to_string());
-        tokenizer.next_token().expect("the 1.2345 should parse ok");
+        let mut tokenizer = Tokenizer::new("1.2345GBP \n @123sdsabcd".to_string());
+        tokenizer
+            .next_token()
+            .expect("the 1.2345GBP should parse ok");
 
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
@@ -406,9 +483,6 @@ option "operating_currency" "GBP"
 
     #[test]
     fn test_cursor_position() {
-        let test = "hello\n".lines().count();
-        println!("number: {}", test);
-
         let mut tokenizer = Tokenizer::new("".to_string());
         tokenizer.set_cursor(0);
         assert_eq!(tokenizer.current_line_column(), (1, 1));
