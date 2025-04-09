@@ -3,13 +3,14 @@ use std::sync::LazyLock;
 use regex::Regex;
 use rust_decimal::{Decimal, prelude::Zero};
 
+//TODO: enforce empty lines
+
 static DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^(\d{4}-\d{2}-\d{2})(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
 });
 
-// TODO: commas e.g. 1,300.00
 static AMOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^(-?\d+(?:\.\d+)?)(?:[ \t]*)([A-Z]+)(?:[ \t\n\r]|$)"#)
+    Regex::new(r#"^(-?(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?)[ \t]*([A-Z]{3,})(?:[ \t\n\r]|$)"#)
         .expect("hard coded regex is valid")
 });
 
@@ -131,7 +132,8 @@ impl Tokenizer {
             let currency = captures
                 .get(2)
                 .expect("if there was a match there will be a 1 capture group");
-            let Ok(amount) = amount.as_str().parse() else {
+            let Ok(amount) = amount.as_str().replace(",", "").parse() else {
+                // the regex accepts commas e.g. 9,000 which won't parse so we strip them out
                 let (line, column) = self.current_line_column();
                 return Err(TokenizeError(format!(
                     "decimal {} on line {}, column {} has too many digits",
@@ -296,7 +298,7 @@ option "operating_currency" "GBP"
 
 2023-02-03 * "Transaction description"
   Assets:AnAsset                                   12 USD @ 0.82 GBP
-  Income:SomeIncome                                     -9.84 GBP
+  Income:SomeIncome                                     -9,000.84 GBP
 "#;
 
         let mut tokenizer = Tokenizer::new(raw.to_string());
@@ -372,10 +374,10 @@ option "operating_currency" "GBP"
         assert_eq!(
             tokenizer
                 .next_token()
-                .expect("cursor is at -9.84 GBP which is a valid Token::Amount"),
+                .expect("cursor is at -9,000.84 GBP which is a valid Token::Amount"),
             Some(Token::Amount(Amount {
                 currency: "GBP".to_string(),
-                amount: "-9.84"
+                amount: "-9000.84"
                     .parse()
                     .expect("hard coded value is a valid decimal")
             }))
