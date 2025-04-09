@@ -331,134 +331,84 @@ mod tests {
 
         assert_eq!(tokenizer.next_token(), Ok(Some(Token::OptionLine)),);
 
-        assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("the next token is Token::Newline"),
-            Some(Token::Newline),
-        );
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
 
         assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("the next token is Token::Newline"),
-            Some(Token::Newline),
+            tokenizer.next_token(),
+            Ok(Some(Token::Date("2023-02-01".to_string())))
         );
 
-        assert_eq!(
-            tokenizer.next_token().expect("should return OK"),
-            Some(Token::Date("2023-02-01".to_string()))
-        );
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::DirectiveOpen)));
 
         assert_eq!(
-            tokenizer.next_token().expect("should return OK"),
-            Some(Token::DirectiveOpen)
-        );
-
-        assert_eq!(
-            tokenizer.next_token().expect("should return OK"),
-            Some(Token::Account(Account::Equity(
+            tokenizer.next_token(),
+            Ok(Some(Token::Account(Account::Equity(
                 "RetainedEarnings".to_string()
-            )))
+            ))))
         );
 
         assert_eq!(
-            tokenizer.next_token().expect("should return OK"),
-            Some(Token::Currency("GBP".to_string()))
+            tokenizer.next_token(),
+            Ok(Some(Token::Currency("GBP".to_string())))
+        );
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token::Date("2023-02-03".to_string())))
+        );
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::DirectivePostTx)));
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token::Account(Account::Assets("AnAsset".to_string()))))
         );
 
         assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("the next token is Token::Newline"),
-            Some(Token::Newline),
-        );
-
-        assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("the next token is Token::Newline"),
-            Some(Token::Newline),
-        );
-
-        assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("the next token is Token::Newline"),
-            Some(Token::Newline),
-        );
-
-        assert_eq!(
-            tokenizer.next_token().expect("should return OK"),
-            Some(Token::Date("2023-02-03".to_string()))
-        );
-
-        assert_eq!(
-            tokenizer.next_token().expect("should return OK"),
-            Some(Token::DirectivePostTx)
-        );
-
-        assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("the next token is Token::Newline"),
-            Some(Token::Newline),
-        );
-
-        assert_eq!(
-            tokenizer.next_token().expect("should return OK"),
-            Some(Token::Account(Account::Assets("AnAsset".to_string())))
-        );
-
-        assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("cursor is at 12 USD which is a valid Token::Amount"),
-            Some(Token::Amount(Amount {
+            tokenizer.next_token(),
+            Ok(Some(Token::Amount(Amount {
                 currency: "USD".to_string(),
                 amount: "12".parse().expect("hard coded value is a valid decimal")
-            }))
+            })))
         );
 
-        assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("cursor is at @ which is a valid Token::At"),
-            Some(Token::At)
-        );
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::At)));
 
         assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("cursor is at 0.82 GBP which is a valid Token::Amount"),
-            Some(Token::Amount(Amount {
+            tokenizer.next_token(),
+            Ok(Some(Token::Amount(Amount {
                 currency: "GBP".to_string(),
                 amount: "0.82".parse().expect("hard coded value is a valid decimal")
-            }))
+            })))
+        );
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token::Account(Account::Income(
+                "SomeIncome".to_string()
+            ))))
         );
 
         assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("the next token is Token::Newline"),
-            Some(Token::Newline),
-        );
-
-        assert_eq!(
-            tokenizer.next_token().expect("should return OK"),
-            Some(Token::Account(Account::Income("SomeIncome".to_string())))
-        );
-
-        assert_eq!(
-            tokenizer
-                .next_token()
-                .expect("cursor is at -9,000.84 GBP which is a valid Token::Amount"),
-            Some(Token::Amount(Amount {
+            tokenizer.next_token(),
+            Ok(Some(Token::Amount(Amount {
                 currency: "GBP".to_string(),
                 amount: "-9000.84"
                     .parse()
                     .expect("hard coded value is a valid decimal")
-            }))
+            })))
         );
 
         assert!(
