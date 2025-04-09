@@ -78,6 +78,7 @@ pub enum Token {
     Currency(String),
     At,
     Newline,
+    OptionLine,
 }
 
 #[derive(Debug, PartialEq)]
@@ -121,9 +122,8 @@ impl Tokenizer {
                 )
             })
         {
-            // we ignore options TODO: don't ignore
             self.cursor += option_line.end();
-            self.next_token()
+            Ok(Some(Token::OptionLine))
         } else if let Some(comment) = COMMENT_REGEX.find(&self.buffer[self.cursor..]) {
             // we ignore comments
             self.cursor += comment.end();
@@ -328,6 +328,8 @@ mod tests {
   Income:SomeIncome                                     -9,000.84 GBP"#;
 
         let mut tokenizer = Tokenizer::new(raw.to_string());
+
+        assert_eq!(tokenizer.next_token(), Ok(Some(Token::OptionLine)),);
 
         assert_eq!(
             tokenizer
