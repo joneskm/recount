@@ -48,15 +48,16 @@ static AT_REGEX: LazyLock<Regex> =
 static NEWLINE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^\r?\n"#).expect("hard coded regex is valid"));
 
-// When something goes wrong we show (up to) this many characters of the remaining unparsed input
-const MAX_ERROR_SAMPLE: usize = 10;
-
 #[derive(Debug, PartialEq)]
-pub struct TokenizeError(String);
+pub struct TokenizeError {
+    msg: String,
+    line: usize,
+    column: usize,
+}
 
 impl std::fmt::Display for TokenizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.msg)
     }
 }
 
@@ -146,12 +147,11 @@ impl Tokenizer {
             let Ok(amount) = amount.as_str().replace(",", "").parse() else {
                 // the regex accepts commas e.g. 9,000 which won't parse so we strip them out
                 let (line, column) = self.current_line_column();
-                return Err(TokenizeError(format!(
-                    "decimal {} on line {}, column {} has too many digits",
-                    amount.as_str(),
+                return Err(TokenizeError {
+                    msg: "decimal has too many digits".to_string(),
                     line,
-                    column
-                )));
+                    column,
+                });
             };
             self.cursor += currency.end();
             Ok(Some(Token::Amount(Amount {
@@ -234,20 +234,12 @@ impl Tokenizer {
             self.cursor += newline.end();
             Ok(Some(Token::Newline))
         } else {
-            let end = self.cursor + MAX_ERROR_SAMPLE;
-            let (endstr, end) = if end < self.buffer.len() {
-                ("...", end)
-            } else {
-                ("", self.buffer.len())
-            };
             let (line, column) = self.current_line_column();
-            Err(TokenizeError(format!(
-                "unexpected character sequence {}{} on line {}, column {}",
-                &self.buffer[self.cursor..end],
-                endstr,
+            Err(TokenizeError {
+                msg: "unexpected character sequence".to_string(),
                 line,
-                column
-            )))
+                column,
+            })
         }
     }
 
@@ -427,10 +419,11 @@ mod tests {
 
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
-            TokenizeError(
-                "decimal 79228162514264337593543950336 on line 1, column 1 has too many digits"
-                    .to_string()
-            )
+            TokenizeError {
+                msg: "decimal has too many digits".to_string(),
+                line: 1,
+                column: 1,
+            }
         )
     }
 
@@ -440,37 +433,51 @@ mod tests {
         let mut tokenizer = Tokenizer::new("792281USDopen".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
-            TokenizeError(
-                "unexpected character sequence 792281USDo... on line 1, column 1".to_string()
-            )
+            TokenizeError {
+                msg: "unexpected character sequence".to_string(),
+                line: 1,
+                column: 1,
+            }
         );
 
         let mut tokenizer = Tokenizer::new("2023-02-01open".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
-            TokenizeError(
-                "unexpected character sequence 2023-02-01... on line 1, column 1".to_string()
-            )
+            TokenizeError {
+                msg: "unexpected character sequence".to_string(),
+                line: 1,
+                column: 1,
+            }
         );
 
         let mut tokenizer = Tokenizer::new("openX".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
-            TokenizeError("unexpected character sequence openX on line 1, column 1".to_string())
+            TokenizeError {
+                msg: "unexpected character sequence".to_string(),
+                line: 1,
+                column: 1,
+            }
         );
 
         let mut tokenizer = Tokenizer::new(r#"option "operating_currency" "GBP"X"#.to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
-            TokenizeError(
-                "unexpected character sequence option \"op... on line 1, column 1".to_string()
-            )
+            TokenizeError {
+                msg: "unexpected character sequence".to_string(),
+                line: 1,
+                column: 1,
+            }
         );
 
         let mut tokenizer = Tokenizer::new("@X".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
-            TokenizeError("unexpected character sequence @X on line 1, column 1".to_string())
+            TokenizeError {
+                msg: "unexpected character sequence".to_string(),
+                line: 1,
+                column: 1,
+            }
         );
     }
 
@@ -479,27 +486,17 @@ mod tests {
         let mut tokenizer = Tokenizer::new(r#"Assets:nOtCapitalized"#.to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
-            TokenizeError(
-                "unexpected character sequence Assets:nOt... on line 1, column 1".to_string()
-            )
+            TokenizeError {
+                msg: "unexpected character sequence".to_string(),
+                line: 1,
+                column: 1,
+            }
         );
     }
 
     #[test]
-    fn check_error_msg_simple() {
-        // very basic check of error message
-        let mut tokenizer = Tokenizer::new("@123sds".to_string());
-
-        assert_eq!(
-            tokenizer.next_token().unwrap_err(),
-            TokenizeError("unexpected character sequence @123sds on line 1, column 1".to_string())
-        )
-    }
-
-    #[test]
-    fn ensure_error_msg_truncated() {
-        // here we ensure that the code sample displayed in the error message is truncated properly
-        // in cases where the remaining unparsed string is longer than MAX_ERROR_SAMPLE
+    fn ensure_error_msg_position() {
+        // here we ensure that the line and column are correct on a slightly trickier buffer
         let mut tokenizer = Tokenizer::new("1.2345GBP \n @123sdsabcd".to_string());
         tokenizer
             .next_token()
@@ -511,9 +508,11 @@ mod tests {
 
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
-            TokenizeError(
-                "unexpected character sequence @123sdsabc... on line 2, column 2".to_string()
-            )
+            TokenizeError {
+                msg: "unexpected character sequence".to_string(),
+                line: 2,
+                column: 2,
+            }
         )
     }
 
