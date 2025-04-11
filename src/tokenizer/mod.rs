@@ -1,7 +1,9 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
-use rust_decimal::{Decimal, prelude::Zero};
+use rust_decimal::prelude::Zero;
+
+use crate::types::{AccountId, Amount};
 
 static DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^(\d{4}-\d{2}-\d{2})(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
@@ -50,9 +52,9 @@ static NEWLINE_REGEX: LazyLock<Regex> =
 
 #[derive(Debug, PartialEq)]
 pub struct TokenizeError {
-    msg: String,
-    line: usize,
-    column: usize,
+    pub(crate) msg: String,
+    pub(crate) line: usize,
+    pub(crate) column: usize,
 }
 
 impl std::fmt::Display for TokenizeError {
@@ -64,18 +66,12 @@ impl std::fmt::Display for TokenizeError {
 impl std::error::Error for TokenizeError {}
 
 #[derive(Debug, PartialEq)]
-pub struct Amount {
-    currency: String,
-    amount: Decimal,
-}
-
-#[derive(Debug, PartialEq)]
 pub enum Token {
     Date(String),
     Amount(Amount),
     DirectiveOpen,
     DirectivePostTx,
-    Account(Account),
+    Account(AccountId),
     Currency(String),
     At,
     Newline,
@@ -83,16 +79,7 @@ pub enum Token {
     TxDescription,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Account {
-    Equity(String),
-    Liabilities(String),
-    Assets(String),
-    Income(String),
-    Expenses(String),
-}
-
-pub struct Tokenizer {
+pub struct RegexTokenizer {
     buffer: String,
     // The cursor represents a position between characters, not the character itself. For a string of
     // length n there are n+1 valid cursor positions.
@@ -103,15 +90,79 @@ pub struct Tokenizer {
     cursor: usize,
 }
 
-impl Tokenizer {
+pub trait Tokenizer {
+    fn next_token(&mut self) -> Result<Option<Token>, TokenizeError>;
+}
+
+impl RegexTokenizer {
     pub fn new(raw: String) -> Self {
-        Tokenizer {
+        RegexTokenizer {
             buffer: raw,
             cursor: 0,
         }
     }
 
-    pub fn next_token(&mut self) -> Result<Option<Token>, TokenizeError> {
+    /// Returns the current one-indexed line number and column of the cursor as a (line_number, column) tuple.
+    fn current_line_column(&self) -> (usize, usize) {
+        (self.current_line(), self.current_column())
+    }
+
+    /// Returns the current one-indexed line number of the cursor. If the cursor is at the start
+    /// of the buffer then it's on line one. Every newline character represents an increment of one
+    /// in the line count - this includes cases where the last character is a newline and the
+    /// cursor increments to the end of the buffer.
+    fn current_line(&self) -> usize {
+        if self.cursor.is_zero() {
+            // If the cursor is at zero i.e. the start of the buffer then below we would calculate
+            // "".lines().count() as zero. However we want to count the start of the buffer as line
+            // one.
+            1
+        } else {
+            let lines = self.buffer[0..self.cursor].lines().count();
+
+            // There's a nasty edge case here. If the string ends in a newline then the lines()
+            // method doesn't return an empty line after the last newline. This means the line
+            // count is one less than we expect (since the cursor is beyond the last newline we
+            // want to count it as being on the next line) e.g.
+            // "hello\n".lines().count() returns one whereas we expect this to count as two lines.
+            // We check for this case and fix accordingly.
+            if self.buffer[0..self.cursor].ends_with("\n") {
+                lines + 1
+            } else {
+                lines
+            }
+        }
+    }
+
+    /// Returns the one-indexed column of the cursor. If the cursor is at the start of the buffer then
+    /// it's at column one. Each increment of the cursor position increments the column number.
+    /// When a newline character is crossed the column counter resets to one.
+    fn current_column(&self) -> usize {
+        if self.cursor.is_zero() {
+            // If the cursor is at zero then `line_start` below would be zero and so the returned
+            // value would also be zero. However if the cursor is at the start of the buffer then
+            // it's by definition at column one. So we override for this edge case.
+            1
+        } else {
+            // Find the start index of the current line.
+            let line_start_index = self.buffer[..self.cursor].rfind('\n').unwrap_or(0); // or start of buffer
+            // If the cursor has value n then the character before the cursor has index n-1
+            // (think of the base case where the cursor has value one then the single character
+            // before it has index zero). So if the cursor is immediately to the right of a newline
+            // character the line_start_index will be one less than the cursor value. Subtraction
+            // would then give a value of one which is the correct column value.
+            self.cursor - line_start_index
+        }
+    }
+
+    #[cfg(test)]
+    fn set_cursor(&mut self, pos: usize) {
+        self.cursor = pos;
+    }
+}
+
+impl Tokenizer for RegexTokenizer {
+    fn next_token(&mut self) -> Result<Option<Token>, TokenizeError> {
         if self.cursor >= self.buffer.len() {
             Ok(None)
         } else if let Some(whitespace) = WHITESPACE_REGEX.find(&self.buffer[self.cursor..]) {
@@ -182,7 +233,9 @@ impl Tokenizer {
             let acct_type = full_account
                 .get(1)
                 .expect("if there was a match there will be a 1 capture group")
-                .as_str();
+                .as_str()
+                .parse()
+                .expect("the regex guarantees that parsing won't fail");
 
             let acct_name = full_account
                 .get(2)
@@ -191,18 +244,10 @@ impl Tokenizer {
             self.cursor += acct_name.end();
             let acct_name = acct_name.as_str();
 
-            match acct_type {
-                "Assets" => Ok(Some(Token::Account(Account::Assets(acct_name.to_string())))),
-                "Equity" => Ok(Some(Token::Account(Account::Equity(acct_name.to_string())))),
-                "Income" => Ok(Some(Token::Account(Account::Income(acct_name.to_string())))),
-                "Expenses" => Ok(Some(Token::Account(Account::Expenses(
-                    acct_name.to_string(),
-                )))),
-                "Liabilities" => Ok(Some(Token::Account(Account::Liabilities(
-                    acct_name.to_string(),
-                )))),
-                _ => unreachable!("the regex forces one of the above"),
-            }
+            Ok(Some(Token::Account(AccountId {
+                type_: acct_type,
+                name: acct_name.to_string(),
+            })))
         } else if let Some(currency) =
             CURRENCY_REGEX
                 .captures(&self.buffer[self.cursor..])
@@ -242,69 +287,12 @@ impl Tokenizer {
             })
         }
     }
-
-    /// Returns the current one-indexed line number and column of the cursor as a (line_number, column) tuple.
-    fn current_line_column(&self) -> (usize, usize) {
-        (self.current_line(), self.current_column())
-    }
-
-    /// Returns the current one-indexed line number of the cursor. If the cursor is at the start
-    /// of the buffer then it's on line one. Every newline character represents an increment of one
-    /// in the line count - this includes cases where the last character is a newline and the
-    /// cursor increments to the end of the buffer.
-    fn current_line(&self) -> usize {
-        if self.cursor.is_zero() {
-            // If the cursor is at zero i.e. the start of the buffer then below we would calculate
-            // "".lines().count() as zero. However we want to count the start of the buffer as line
-            // one.
-            1
-        } else {
-            let lines = self.buffer[0..self.cursor].lines().count();
-
-            // There's a nasty edge case here. If the string ends in a newline then the lines()
-            // method doesn't return an empty line after the last newline. This means the line
-            // count is one less than we expect (since the cursor is beyond the last newline we
-            // want to count it as being on the next line) e.g.
-            // "hello\n".lines().count() returns one whereas we expect this to count as two lines.
-            // We check for this case and fix accordingly.
-            if self.buffer[0..self.cursor].ends_with("\n") {
-                lines + 1
-            } else {
-                lines
-            }
-        }
-    }
-
-    /// Returns the one-indexed column of the cursor. If the cursor is at the start of the buffer then
-    /// it's at column one. Each increment of the cursor position increments the column number.
-    /// When a newline character is crossed the column counter resets to one.
-    fn current_column(&self) -> usize {
-        if self.cursor.is_zero() {
-            // If the cursor is at zero then `line_start` below would be zero and so the returned
-            // value would also be zero. However if the cursor is at the start of the buffer then
-            // it's by definition at column one. So we override for this edge case.
-            1
-        } else {
-            // Find the start index of the current line.
-            let line_start_index = self.buffer[..self.cursor].rfind('\n').unwrap_or(0); // or start of buffer
-            // If the cursor has value n then the character before the cursor has index n-1
-            // (think of the base case where the cursor has value one then the single character
-            // before it has index zero). So if the cursor is immediately to the right of a newline
-            // character the line_start_index will be one less than the cursor value. Subtraction
-            // would then give a value of one which is the correct column value.
-            self.cursor - line_start_index
-        }
-    }
-
-    #[cfg(test)]
-    fn set_cursor(&mut self, pos: usize) {
-        self.cursor = pos;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::AccountType;
 
     #[test]
     fn it_works() {
@@ -319,7 +307,7 @@ mod tests {
   Assets:AnAsset                                   12 USD @ 0.82 GBP
   Income:SomeIncome                                     -9,000.84 GBP"#;
 
-        let mut tokenizer = Tokenizer::new(raw.to_string());
+        let mut tokenizer = RegexTokenizer::new(raw.to_string());
 
         assert_eq!(tokenizer.next_token(), Ok(Some(Token::OptionLine)),);
 
@@ -336,9 +324,10 @@ mod tests {
 
         assert_eq!(
             tokenizer.next_token(),
-            Ok(Some(Token::Account(Account::Equity(
-                "RetainedEarnings".to_string()
-            ))))
+            Ok(Some(Token::Account(AccountId {
+                type_: AccountType::Equity,
+                name: "RetainedEarnings".to_string()
+            })))
         );
 
         assert_eq!(
@@ -365,7 +354,10 @@ mod tests {
 
         assert_eq!(
             tokenizer.next_token(),
-            Ok(Some(Token::Account(Account::Assets("AnAsset".to_string()))))
+            Ok(Some(Token::Account(AccountId {
+                type_: AccountType::Asset,
+                name: "AnAsset".to_string()
+            })))
         );
 
         assert_eq!(
@@ -390,9 +382,10 @@ mod tests {
 
         assert_eq!(
             tokenizer.next_token(),
-            Ok(Some(Token::Account(Account::Income(
-                "SomeIncome".to_string()
-            ))))
+            Ok(Some(Token::Account(AccountId {
+                type_: AccountType::Income,
+                name: "SomeIncome".to_string()
+            })))
         );
 
         assert_eq!(
@@ -415,7 +408,7 @@ mod tests {
 
     #[test]
     fn ensure_error_when_decimal_too_many_digits() {
-        let mut tokenizer = Tokenizer::new("79228162514264337593543950336GBP".to_string());
+        let mut tokenizer = RegexTokenizer::new("79228162514264337593543950336GBP".to_string());
 
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
@@ -430,7 +423,7 @@ mod tests {
     #[test]
     fn ensure_followed_by_whitespace() {
         // Ensures that tokens are followed by whitespace.
-        let mut tokenizer = Tokenizer::new("792281USDopen".to_string());
+        let mut tokenizer = RegexTokenizer::new("792281USDopen".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -440,7 +433,7 @@ mod tests {
             }
         );
 
-        let mut tokenizer = Tokenizer::new("2023-02-01open".to_string());
+        let mut tokenizer = RegexTokenizer::new("2023-02-01open".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -450,7 +443,7 @@ mod tests {
             }
         );
 
-        let mut tokenizer = Tokenizer::new("openX".to_string());
+        let mut tokenizer = RegexTokenizer::new("openX".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -460,7 +453,8 @@ mod tests {
             }
         );
 
-        let mut tokenizer = Tokenizer::new(r#"option "operating_currency" "GBP"X"#.to_string());
+        let mut tokenizer =
+            RegexTokenizer::new(r#"option "operating_currency" "GBP"X"#.to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -470,7 +464,7 @@ mod tests {
             }
         );
 
-        let mut tokenizer = Tokenizer::new("@X".to_string());
+        let mut tokenizer = RegexTokenizer::new("@X".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -483,7 +477,7 @@ mod tests {
 
     #[test]
     fn account_name_capitalized() {
-        let mut tokenizer = Tokenizer::new(r#"Assets:nOtCapitalized"#.to_string());
+        let mut tokenizer = RegexTokenizer::new(r#"Assets:nOtCapitalized"#.to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -497,7 +491,7 @@ mod tests {
     #[test]
     fn ensure_error_msg_position() {
         // here we ensure that the line and column are correct on a slightly trickier buffer
-        let mut tokenizer = Tokenizer::new("1.2345GBP \n @123sdsabcd".to_string());
+        let mut tokenizer = RegexTokenizer::new("1.2345GBP \n @123sdsabcd".to_string());
         tokenizer
             .next_token()
             .expect("the 1.2345GBP should parse ok");
@@ -518,23 +512,23 @@ mod tests {
 
     #[test]
     fn test_cursor_position() {
-        let mut tokenizer = Tokenizer::new("".to_string());
+        let mut tokenizer = RegexTokenizer::new("".to_string());
         tokenizer.set_cursor(0);
         assert_eq!(tokenizer.current_line_column(), (1, 1));
 
-        let mut tokenizer = Tokenizer::new("hello".to_string());
+        let mut tokenizer = RegexTokenizer::new("hello".to_string());
         tokenizer.set_cursor(0);
         assert_eq!(tokenizer.current_line_column(), (1, 1));
 
-        let mut tokenizer = Tokenizer::new("hello\n\n".to_string());
+        let mut tokenizer = RegexTokenizer::new("hello\n\n".to_string());
         tokenizer.set_cursor(7);
         assert_eq!(tokenizer.current_line_column(), (3, 1));
 
-        let mut tokenizer = Tokenizer::new("hello\n\n".to_string());
+        let mut tokenizer = RegexTokenizer::new("hello\n\n".to_string());
         tokenizer.set_cursor(6);
         assert_eq!(tokenizer.current_line_column(), (2, 1));
 
-        let mut tokenizer = Tokenizer::new("hello\nworld".to_string());
+        let mut tokenizer = RegexTokenizer::new("hello\nworld".to_string());
         tokenizer.set_cursor(7);
         assert_eq!(tokenizer.current_line_column(), (2, 2));
     }
