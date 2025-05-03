@@ -237,6 +237,7 @@ mod tests {
     use super::*;
     use crate::types::AccountType;
     use date::date;
+    use rust_decimal::dec;
 
     #[test]
     fn balance_works() {
@@ -285,6 +286,97 @@ mod tests {
         assert_eq!(balances.next(), None);
     }
 
+    #[test]
+    fn add_posting_works() {
+        // We create an transaction with no postings. Then add an initial posting. This can't fail
+        // because the transaction has no currency. We then add four more postings covering the
+        // four cases:
+        // - correct currency
+        // - incorrect currency
+        // - correct resolved currency
+        // - incorrect resolved currency
+        let mut transaction = Transaction {
+            date: date! {2012-05-13},
+            _description: "a description".to_string(),
+            currency: None,
+            postings: vec![],
+        };
+
+        transaction
+            .add_posting(Posting {
+                account_id: AccountId {
+                    name: "account 1".to_string(),
+                    type_: AccountType::Asset,
+                },
+                amount: 100.into(),
+                currency: "GBP".to_string(),
+                converter: Some(CurrencyConverter {
+                    currency: "USD".to_string(),
+                    rate: dec!(1.5),
+                }),
+            })
+            .expect("this can't fail beacuase the tx doesn't yet have a currency");
+
+        assert_eq!(transaction.currency, Some("USD".to_string()));
+
+        transaction
+            .add_posting(Posting {
+                account_id: AccountId {
+                    name: "account 2".to_string(),
+                    type_: AccountType::Asset,
+                },
+                amount: 50.into(),
+                currency: "USD".to_string(),
+                converter: None,
+            })
+            .expect("this is in the same currency as the tx so it won't fail");
+
+        let err = transaction
+            .add_posting(Posting {
+                account_id: AccountId {
+                    name: "account 3".to_string(),
+                    type_: AccountType::Asset,
+                },
+                amount: 90.into(),
+                currency: "GBP".to_string(),
+                converter: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(err, AddPostingError::IncorrectCurrency);
+
+        transaction
+            .add_posting(Posting {
+                account_id: AccountId {
+                    name: "account 4".to_string(),
+                    type_: AccountType::Asset,
+                },
+                amount: 10.into(),
+                currency: "EUR".to_string(),
+                converter: Some(CurrencyConverter {
+                    currency: "USD".to_string(),
+                    rate: dec!(1.7),
+                }),
+            })
+            .expect("this can't fail beacuase the posting resolves to the same currency as the tx");
+
+        let err = transaction
+            .add_posting(Posting {
+                account_id: AccountId {
+                    name: "account 1".to_string(),
+                    type_: AccountType::Asset,
+                },
+                amount: 100.into(),
+                currency: "GBP".to_string(),
+                converter: Some(CurrencyConverter {
+                    currency: "EUR".to_string(),
+                    rate: dec!(1.5),
+                }),
+            })
+            .unwrap_err();
+
+        assert_eq!(err, AddPostingError::IncorrectCurrency)
+    }
     #[test]
     fn add_transaction_works() {
         accounts_doc()
