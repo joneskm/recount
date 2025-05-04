@@ -166,7 +166,7 @@ impl AccountsDocument {
             if transaction.date < account.opening_date {
                 return Err(AddTransactionError::AccountNotOpen);
             }
-            if &account.currency != posting.resolved_currency() {
+            if account.currency != posting.currency {
                 return Err(AddTransactionError::IncorrectCurrency);
             }
             running_total += posting.resolved_amount();
@@ -379,6 +379,11 @@ mod tests {
     }
     #[test]
     fn add_transaction_works() {
+        // We test the happy path followed by a test for each error variant:
+        // - AccountNotFound
+        // - AccountNotOpen
+        // - IncorrectCurrency
+        // - NotBalanced
         accounts_doc()
             .add_transaction(Transaction {
                 date: date! {2012-05-13},
@@ -396,16 +401,145 @@ mod tests {
                     },
                     Posting {
                         account_id: AccountId {
-                            name: "AccountA".to_string(),
+                            name: "AccountB".to_string(),
                             type_: AccountType::Income,
                         },
                         amount: (-100_i8).into(),
+                        currency: "USD".to_string(),
+                        converter: Some(CurrencyConverter {
+                            currency: "GBP".into(),
+                            rate: 1.into(),
+                        }),
+                    },
+                ],
+            })
+            .expect("won't return an error");
+
+        let err = accounts_doc()
+            .add_transaction(Transaction {
+                date: date! {2012-05-13},
+                _description: "Another Tx".to_string(),
+                currency: Some("GBP".to_string()),
+                postings: vec![
+                    Posting {
+                        account_id: AccountId {
+                            name: "AccountA".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: 100.into(),
                         currency: "GBP".to_string(),
+                        converter: None,
+                    },
+                    Posting {
+                        account_id: AccountId {
+                            name: "AccountB".to_string(),
+                            type_: AccountType::Asset, // There is no account named "AccountB" with
+                                                       // type Asset (there is an "AccountB" with type Income).
+                        },
+                        amount: (-100_i8).into(),
+                        currency: "USD".to_string(),
+                        converter: Some(CurrencyConverter {
+                            currency: "GBP".into(),
+                            rate: 1.into(),
+                        }),
+                    },
+                ],
+            })
+            .unwrap_err();
+        assert_eq!(err, AddTransactionError::AccountNotFound);
+
+        let err = accounts_doc()
+            .add_transaction(Transaction {
+                date: date! {2012-04-11}, // this is before the accounts were opened
+                _description: "Another Tx".to_string(),
+                currency: Some("GBP".to_string()),
+                postings: vec![
+                    Posting {
+                        account_id: AccountId {
+                            name: "AccountA".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: 100.into(),
+                        currency: "GBP".to_string(),
+                        converter: None,
+                    },
+                    Posting {
+                        account_id: AccountId {
+                            name: "AccountB".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: (-100_i8).into(),
+                        currency: "USD".to_string(),
+                        converter: Some(CurrencyConverter {
+                            currency: "GBP".into(),
+                            rate: 1.into(),
+                        }),
+                    },
+                ],
+            })
+            .unwrap_err();
+        assert_eq!(err, AddTransactionError::AccountNotOpen);
+
+        let err = accounts_doc()
+            .add_transaction(Transaction {
+                date: date! {2012-05-13},
+                _description: "Another Tx".to_string(),
+                currency: Some("GBP".to_string()),
+                postings: vec![
+                    Posting {
+                        account_id: AccountId {
+                            name: "AccountA".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: 100.into(),
+                        currency: "GBP".to_string(),
+                        converter: None,
+                    },
+                    Posting {
+                        account_id: AccountId {
+                            name: "AccountB".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: (-100_i8).into(),
+                        currency: "GBP".to_string(), // this doesn't match the account currency
                         converter: None,
                     },
                 ],
             })
-            .expect("should not return an error");
+            .unwrap_err();
+        assert_eq!(err, AddTransactionError::IncorrectCurrency);
+
+        let err = accounts_doc()
+            .add_transaction(Transaction {
+                date: date! {2012-05-13},
+                _description: "Another Tx".to_string(),
+                currency: Some("GBP".to_string()),
+                postings: vec![
+                    Posting {
+                        account_id: AccountId {
+                            name: "AccountA".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: 100.into(),
+                        currency: "GBP".to_string(),
+                        converter: None,
+                    },
+                    Posting {
+                        account_id: AccountId {
+                            name: "AccountB".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: (-100_i8).into(),
+                        currency: "USD".to_string(),
+                        converter: Some(CurrencyConverter {
+                            currency: "GBP".into(),
+                            rate: dec!(1.1),
+                        }),
+                    },
+                ],
+            })
+            .unwrap_err();
+        assert_eq!(err, AddTransactionError::NotBalanced);
     }
 
     fn accounts_doc() -> AccountsDocument {
