@@ -287,6 +287,33 @@ mod tests {
     }
 
     #[test]
+    fn open_an_account_works() {
+        accounts_doc()
+            .open_an_account(Account {
+                id: AccountId {
+                    name: "AccountA".to_string(),
+                    type_: AccountType::Asset,
+                },
+                currency: "GBP".to_string(),
+                opening_date: date! {2012-01-04},
+            })
+            .expect("there is no acount with the same AccountId so this won't fail");
+
+        let err = accounts_doc()
+            .open_an_account(Account {
+                id: AccountId {
+                    name: "AccountA".to_string(),
+                    type_: AccountType::Income,
+                },
+                currency: "GBP".to_string(),
+                opening_date: date! {2012-01-04},
+            })
+            .unwrap_err();
+
+        assert_eq!(err, OpenAccountError::AccountAlreadyExists)
+    }
+
+    #[test]
     fn add_posting_works() {
         // We create an transaction with no postings. Then add an initial posting. This can't fail
         // because the transaction has no currency. We then add four more postings covering the
