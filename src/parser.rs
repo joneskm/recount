@@ -32,7 +32,7 @@ impl From<TokenizeError> for ParseError {
 impl std::error::Error for ParseError {}
 
 pub fn parse(
-    tokenizer: impl IntoIterator<Item = Result<Token, ParseError>>,
+    tokenizer: impl IntoIterator<Item = Result<Token, TokenizeError>>,
 ) -> Result<AccountsDocument, ParseError> {
     let mut tokenizer = tokenizer.into_iter();
     let mut accounts_doc = AccountsDocument::new();
@@ -259,7 +259,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
+    fn happy_path() {
         let mut tokens = vec![];
         add_open_account_tokens(
             &mut tokens,
@@ -322,7 +322,7 @@ mod tests {
     }
 
     fn add_open_account_tokens(
-        tokens: &mut Vec<Result<Token, ParseError>>,
+        tokens: &mut Vec<Result<Token, TokenizeError>>,
         date: impl Into<String>,
         account_type: AccountType,
         account_name: impl Into<String>,
@@ -342,7 +342,7 @@ mod tests {
     }
 
     fn add_tx_declaration_tokens(
-        tokens: &mut Vec<Result<Token, ParseError>>,
+        tokens: &mut Vec<Result<Token, TokenizeError>>,
         date: impl Into<String>,
     ) {
         let mut tx_declare = vec![
@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn add_post_tokens(
-        tokens: &mut Vec<Result<Token, ParseError>>,
+        tokens: &mut Vec<Result<Token, TokenizeError>>,
         amount: Decimal,
         account_type: AccountType,
         account_name: impl Into<String>,

@@ -50,6 +50,7 @@ static AT_REGEX: LazyLock<Regex> =
 static NEWLINE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^\r?\n"#).expect("hard coded regex is valid"));
 
+/// The error returned if the tokenizer fetches the next token.
 #[derive(Debug, PartialEq)]
 pub struct TokenizeError {
     pub(crate) msg: String,
@@ -65,6 +66,7 @@ impl std::fmt::Display for TokenizeError {
 
 impl std::error::Error for TokenizeError {}
 
+/// The Token variants.
 #[derive(Debug, PartialEq)]
 pub enum Token {
     Date(String),
@@ -79,7 +81,18 @@ pub enum Token {
     TxDescription,
 }
 
-pub struct RegexTokenizer {
+/// Creates [`Token`]s from a raw [`String`]. Tokenizer implements [`Iterator`], yielding a [`Result<Token, TokenizerError>`].
+///
+/// # Examples
+///
+/// ```
+/// use recount::{types::{AccountId, AccountType::Equity}, tokenizer::{Tokenizer, Token, TokenizeError}};
+///
+/// let tokenizer = Tokenizer::new("2023-02-01 open Equity:RetainedEarnings");
+/// let tokens = tokenizer.collect::<Result<Vec<Token>, TokenizeError>>().unwrap();
+/// assert_eq!(vec![Token::Date("2023-02-01".to_string()),Token::DirectiveOpen, Token::Account(AccountId { name: "RetainedEarnings".to_string(), type_: Equity }) ], tokens)
+/// ```
+pub struct Tokenizer {
     buffer: String,
     // The cursor represents a position between characters, not the character itself. For a string of
     // length n there are n+1 valid cursor positions.
@@ -90,14 +103,11 @@ pub struct RegexTokenizer {
     cursor: usize,
 }
 
-pub trait Tokenizer {
-    fn next_token(&mut self) -> Result<Option<Token>, TokenizeError>;
-}
-
-impl RegexTokenizer {
-    pub fn new(raw: String) -> Self {
-        RegexTokenizer {
-            buffer: raw,
+impl Tokenizer {
+    /// Tokenizer constructor.
+    pub fn new(buffer: impl Into<String>) -> Self {
+        Tokenizer {
+            buffer: buffer.into(),
             cursor: 0,
         }
     }
@@ -161,7 +171,15 @@ impl RegexTokenizer {
     }
 }
 
-impl Tokenizer for RegexTokenizer {
+impl Iterator for Tokenizer {
+    type Item = Result<Token, TokenizeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_token().transpose()
+    }
+}
+
+impl Tokenizer {
     fn next_token(&mut self) -> Result<Option<Token>, TokenizeError> {
         if self.cursor >= self.buffer.len() {
             Ok(None)
@@ -307,7 +325,7 @@ mod tests {
   Assets:AnAsset                                   12 USD @ 0.82 GBP
   Income:SomeIncome                                     -9,000.84 GBP"#;
 
-        let mut tokenizer = RegexTokenizer::new(raw.to_string());
+        let mut tokenizer = Tokenizer::new(raw.to_string());
 
         assert_eq!(tokenizer.next_token(), Ok(Some(Token::OptionLine)),);
 
@@ -408,7 +426,7 @@ mod tests {
 
     #[test]
     fn ensure_error_when_decimal_too_many_digits() {
-        let mut tokenizer = RegexTokenizer::new("79228162514264337593543950336GBP".to_string());
+        let mut tokenizer = Tokenizer::new("79228162514264337593543950336GBP".to_string());
 
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
@@ -423,7 +441,7 @@ mod tests {
     #[test]
     fn ensure_followed_by_whitespace() {
         // Ensures that tokens are followed by whitespace.
-        let mut tokenizer = RegexTokenizer::new("792281USDopen".to_string());
+        let mut tokenizer = Tokenizer::new("792281USDopen".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -433,7 +451,7 @@ mod tests {
             }
         );
 
-        let mut tokenizer = RegexTokenizer::new("2023-02-01open".to_string());
+        let mut tokenizer = Tokenizer::new("2023-02-01open".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -443,7 +461,7 @@ mod tests {
             }
         );
 
-        let mut tokenizer = RegexTokenizer::new("openX".to_string());
+        let mut tokenizer = Tokenizer::new("openX".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -453,8 +471,7 @@ mod tests {
             }
         );
 
-        let mut tokenizer =
-            RegexTokenizer::new(r#"option "operating_currency" "GBP"X"#.to_string());
+        let mut tokenizer = Tokenizer::new(r#"option "operating_currency" "GBP"X"#.to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -464,7 +481,7 @@ mod tests {
             }
         );
 
-        let mut tokenizer = RegexTokenizer::new("@X".to_string());
+        let mut tokenizer = Tokenizer::new("@X".to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -477,7 +494,7 @@ mod tests {
 
     #[test]
     fn account_name_capitalized() {
-        let mut tokenizer = RegexTokenizer::new(r#"Assets:nOtCapitalized"#.to_string());
+        let mut tokenizer = Tokenizer::new(r#"Assets:nOtCapitalized"#.to_string());
         assert_eq!(
             tokenizer.next_token().unwrap_err(),
             TokenizeError {
@@ -491,7 +508,7 @@ mod tests {
     #[test]
     fn ensure_error_msg_position() {
         // here we ensure that the line and column are correct on a slightly trickier buffer
-        let mut tokenizer = RegexTokenizer::new("1.2345GBP \n @123sdsabcd".to_string());
+        let mut tokenizer = Tokenizer::new("1.2345GBP \n @123sdsabcd".to_string());
         tokenizer
             .next_token()
             .expect("the 1.2345GBP should parse ok");
@@ -512,23 +529,23 @@ mod tests {
 
     #[test]
     fn test_cursor_position() {
-        let mut tokenizer = RegexTokenizer::new("".to_string());
+        let mut tokenizer = Tokenizer::new("".to_string());
         tokenizer.set_cursor(0);
         assert_eq!(tokenizer.current_line_column(), (1, 1));
 
-        let mut tokenizer = RegexTokenizer::new("hello".to_string());
+        let mut tokenizer = Tokenizer::new("hello".to_string());
         tokenizer.set_cursor(0);
         assert_eq!(tokenizer.current_line_column(), (1, 1));
 
-        let mut tokenizer = RegexTokenizer::new("hello\n\n".to_string());
+        let mut tokenizer = Tokenizer::new("hello\n\n".to_string());
         tokenizer.set_cursor(7);
         assert_eq!(tokenizer.current_line_column(), (3, 1));
 
-        let mut tokenizer = RegexTokenizer::new("hello\n\n".to_string());
+        let mut tokenizer = Tokenizer::new("hello\n\n".to_string());
         tokenizer.set_cursor(6);
         assert_eq!(tokenizer.current_line_column(), (2, 1));
 
-        let mut tokenizer = RegexTokenizer::new("hello\nworld".to_string());
+        let mut tokenizer = Tokenizer::new("hello\nworld".to_string());
         tokenizer.set_cursor(7);
         assert_eq!(tokenizer.current_line_column(), (2, 2));
     }

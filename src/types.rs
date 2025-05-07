@@ -13,8 +13,8 @@ pub enum AccountType {
 /// Account identifier.
 #[derive(Debug, PartialEq, Eq)]
 pub struct AccountId {
-    pub(crate) name: String,
-    pub(crate) type_: AccountType,
+    pub name: String,
+    pub type_: AccountType,
 }
 
 #[derive(PartialEq, Eq, Debug)]
