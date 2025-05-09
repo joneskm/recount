@@ -2,9 +2,31 @@ use std::fmt::Display;
 
 use crate::{
     accounts_doc::{Account, AccountsDocument, CurrencyConverter, Posting, Transaction},
-    tokenizer::{Token, TokenizeError},
+    tokenizer::{Token, TokenKind, TokenizeError},
     types::AccountId,
 };
+
+macro_rules! expect_token {
+    ($tokenizer:expr, $pattern:pat => $binding:expr, $err_msg:expr, $line:ident, $column:ident) => {{
+        let Some(token) = $tokenizer.next().transpose()? else {
+            return Err(ParseError {
+                msg: $err_msg.to_string(),
+                line: $line,
+                column: $column,
+            });
+        };
+
+        let $pattern = token.kind else {
+            return Err(ParseError {
+                msg: $err_msg.to_string(),
+                line: token.line,
+                column: token.column,
+            });
+        };
+
+        ($binding, token.line, token.column)
+    }};
+}
 
 #[derive(Debug, PartialEq)]
 pub struct ParseError {
@@ -39,35 +61,39 @@ pub fn parse(
 
     // transactions or open directive loop
     'tx_open_loop: while let Some(token) = tokenizer.next().transpose()? {
-        if token == Token::Newline {
+        if token.kind == TokenKind::Newline {
             continue;
         }
 
-        let Token::Date(date) = token else {
+        let TokenKind::Date(date) = token.kind else {
             return Err(ParseError {
                 msg: "expected date".to_string(),
-                line: 0,
-                column: 0,
+                line: token.line,
+                column: token.column,
             });
         };
 
         match tokenizer.next().transpose()? {
-            Some(Token::DirectiveOpen) => {
-                let Some(Token::Account(account)) = tokenizer.next().transpose()? else {
-                    return Err(ParseError {
-                        msg: "expected account".to_string(),
-                        line: 0,
-                        column: 0,
-                    });
-                };
+            Some(Token {
+                kind: TokenKind::DirectiveOpen,
+                line,
+                column,
+            }) => {
+                let (account, line, column) = expect_token!(
+                    tokenizer,
+                    TokenKind::Account(account) => account,
+                    "expected account",
+                    line,
+                    column
+                );
 
-                let Some(Token::Currency(currency)) = tokenizer.next().transpose()? else {
-                    return Err(ParseError {
-                        msg: "expected amount".to_string(),
-                        line: 0,
-                        column: 0,
-                    });
-                };
+                let (currency, _, _) = expect_token!(
+                        tokenizer,
+                        TokenKind::Currency(currency) => currency,
+                        "expected amount",
+                        line,
+                        column
+                );
 
                 accounts_doc
                     .open_an_account(Account {
@@ -88,11 +114,11 @@ pub fn parse(
                 // the end of the file. Any other token is an error.
 
                 if let Some(token) = tokenizer.next().transpose()? {
-                    if token != Token::Newline {
+                    if token.kind != TokenKind::Newline {
                         return Err(ParseError {
                             msg: "expected newline".to_string(),
-                            line: 0,
-                            column: 0,
+                            line: token.line,
+                            column: token.column,
                         });
                     }
                 } else {
@@ -101,49 +127,56 @@ pub fn parse(
                     break 'tx_open_loop;
                 };
             }
-            Some(Token::DirectivePostTx) => {
-                if Some(Token::TxDescription) != tokenizer.next().transpose()? {
-                    return Err(ParseError {
-                        msg: "expected tx description".to_string(),
-                        line: 0,
-                        column: 0,
-                    });
-                };
+            Some(Token {
+                kind: TokenKind::DirectivePostTx,
+                line,
+                column,
+            }) => {
+                let (_, line, column) = expect_token!(
+                    tokenizer,
+                    TokenKind::TxDescription => (),
+                    "expected tx description",
+                    line,
+                    column
+                );
 
-                if Some(Token::Newline) != tokenizer.next().transpose()? {
-                    return Err(ParseError {
-                        msg: "expected newline".to_string(),
-                        line: 0,
-                        column: 0,
-                    });
-                };
+                let (_, line, column) = expect_token!(
+                    tokenizer,
+                    TokenKind::Newline => (),
+                    "expected newline",
+                    line,
+                    column
+                );
 
                 let mut transaction = Transaction::new(date.parse().unwrap(), "todo"); // TODO:unwrap + description
 
                 'posts_loop: while let Some(token) = tokenizer.next().transpose()? {
-                    if token == Token::Newline {
+                    if token.kind == TokenKind::Newline {
                         // We've reached the end of the postings. We'll add the transaction to the
                         // accounts document after the loop.
                         break 'posts_loop;
                     }
-                    let Token::Account(account_id) = token else {
+                    let TokenKind::Account(account_id) = token.kind else {
                         return Err(ParseError {
                             msg: "expected account".to_string(),
-                            line: 0,
-                            column: 0,
+                            line: token.line,
+                            column: token.column,
                         });
                     };
 
-                    let Some(Token::Amount(amount)) = tokenizer.next().transpose()? else {
-                        return Err(ParseError {
-                            msg: "expected amount".to_string(),
-                            line: 0,
-                            column: 0,
-                        });
-                    };
+                    let (amount, line, column) = expect_token!(
+                        tokenizer,
+                        TokenKind::Amount(amount) => amount,
+                        "expected amount",
+                        line,
+                        column
+                    );
 
                     match tokenizer.next().transpose()? {
-                        Some(Token::Newline) => {
+                        Some(Token {
+                            kind: TokenKind::Newline,
+                            ..
+                        }) => {
                             // This posting has no conversion, we can add it to the transaction
                             // and move on.
 
@@ -158,21 +191,33 @@ pub fn parse(
 
                             continue;
                         }
-                        Some(Token::At) => {
-                            let Some(Token::Amount(conversion)) = tokenizer.next().transpose()?
-                            else {
-                                return Err(ParseError {
-                                    msg: "expected amount".to_string(),
-                                    line: 0,
-                                    column: 0,
-                                });
-                            };
+                        Some(Token {
+                            kind: TokenKind::At,
+                            line,
+                            column,
+                        }) => {
+                            let (amount, line, column) = expect_token!(
+                                tokenizer,
+                                TokenKind::Amount(amount) => amount,
+                                "expected amount",
+                                line,
+                                column
+                            );
+
+                            let (conversion, _, _) = expect_token!(
+                                tokenizer,
+                                TokenKind::Amount(conversion) => conversion,
+                                "expected amount",
+                                line,
+                                column
+                            );
+
                             if let Some(token) = tokenizer.next().transpose()? {
-                                if token != Token::Newline {
+                                if token.kind != TokenKind::Newline {
                                     return Err(ParseError {
                                         msg: "expected newline".to_string(),
-                                        line: 0,
-                                        column: 0,
+                                        line: token.line,
+                                        column: token.column,
                                     });
                                 }
                                 transaction
@@ -224,23 +269,22 @@ pub fn parse(
                         _ => {
                             return Err(ParseError {
                                 msg: "expected newline, end of file or @".to_string(),
-                                line: 0,
-                                column: 0,
+                                line,
+                                column,
                             });
                         }
                     }
                 }
                 accounts_doc.add_transaction(transaction).unwrap(); //TODO: unwrap
             }
-
             _ => {
                 // `None` (end of file) or any other token (open or create transaction are covered by the match
                 // branches above) is an error
                 // (this is because we've parsed a date up to this point).
                 return Err(ParseError {
                     msg: "expected either open or post transaction directive".to_string(),
-                    line: 0,
-                    column: 0,
+                    line: token.line,
+                    column: token.column,
                 });
             }
         }
@@ -268,7 +312,11 @@ mod tests {
             "account name",
             "GBP",
         );
-        tokens.push(Ok(Token::Newline));
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
         add_open_account_tokens(
             &mut tokens,
             "1912-01-12",
@@ -276,10 +324,22 @@ mod tests {
             "another account",
             "GBP",
         );
-        tokens.push(Ok(Token::Newline));
-        tokens.push(Ok(Token::Newline));
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
         add_tx_declaration_tokens(&mut tokens, "1912-01-12");
-        tokens.push(Ok(Token::Newline));
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
         add_post_tokens(
             &mut tokens,
             "6.45".parse().expect("hard coded value will parse"),
@@ -287,7 +347,11 @@ mod tests {
             "another account",
             "GBP",
         );
-        tokens.push(Ok(Token::Newline));
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
         add_post_tokens(
             &mut tokens,
             "-6.45".parse().expect("hard coded value will parse"),
@@ -329,13 +393,29 @@ mod tests {
         currency: impl Into<String>,
     ) {
         let mut open = vec![
-            Ok(Token::Date(date.into())),
-            Ok(Token::DirectiveOpen),
-            Ok(Token::Account(crate::types::AccountId {
-                type_: account_type,
-                name: account_name.into(),
-            })),
-            Ok(Token::Currency(currency.into())),
+            Ok(Token {
+                kind: TokenKind::Date(date.into()),
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::DirectiveOpen,
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::Account(crate::types::AccountId {
+                    type_: account_type,
+                    name: account_name.into(),
+                }),
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::Currency(currency.into()),
+                line: 0,
+                column: 0,
+            }),
         ];
 
         tokens.append(&mut open);
@@ -346,9 +426,21 @@ mod tests {
         date: impl Into<String>,
     ) {
         let mut tx_declare = vec![
-            Ok(Token::Date(date.into())),
-            Ok(Token::DirectivePostTx),
-            Ok(Token::TxDescription),
+            Ok(Token {
+                kind: TokenKind::Date(date.into()),
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::DirectivePostTx,
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::TxDescription,
+                line: 0,
+                column: 0,
+            }),
         ];
 
         tokens.append(&mut tx_declare);
@@ -362,14 +454,22 @@ mod tests {
         currency: impl Into<String>,
     ) {
         let mut open = vec![
-            Ok(Token::Account(crate::types::AccountId {
-                type_: account_type,
-                name: account_name.into(),
-            })),
-            Ok(Token::Amount(Amount {
-                currency: currency.into(),
-                amount,
-            })),
+            Ok(Token {
+                kind: TokenKind::Account(crate::types::AccountId {
+                    type_: account_type,
+                    name: account_name.into(),
+                }),
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::Amount(Amount {
+                    currency: currency.into(),
+                    amount,
+                }),
+                line: 0,
+                column: 0,
+            }),
         ];
 
         tokens.append(&mut open);

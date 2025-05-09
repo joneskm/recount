@@ -66,9 +66,9 @@ impl std::fmt::Display for TokenizeError {
 
 impl std::error::Error for TokenizeError {}
 
-/// The Token variants.
+/// The kind of [`Token`].
 #[derive(Debug, PartialEq)]
-pub enum Token {
+pub enum TokenKind {
     Date(String),
     Amount(Amount),
     DirectiveOpen,
@@ -81,16 +81,49 @@ pub enum Token {
     TxDescription,
 }
 
+/// The tokens returned by [`Tokenizer`].
+#[derive(Debug, PartialEq)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub line: usize,
+    pub column: usize,
+}
+
 /// Creates [`Token`]s from a raw [`String`]. Tokenizer implements [`Iterator`], yielding a [`Result<Token, TokenizerError>`].
 ///
 /// # Examples
 ///
 /// ```
-/// use recount::{types::{AccountId, AccountType::Equity}, tokenizer::{Tokenizer, Token, TokenizeError}};
+/// use recount::{types::{AccountId, AccountType::Equity}, tokenizer::{Tokenizer, TokenKind, Token, TokenizeError}};
+///
 ///
 /// let tokenizer = Tokenizer::new("2023-02-01 open Equity:RetainedEarnings");
-/// let tokens = tokenizer.collect::<Result<Vec<Token>, TokenizeError>>().unwrap();
-/// assert_eq!(vec![Token::Date("2023-02-01".to_string()),Token::DirectiveOpen, Token::Account(AccountId { name: "RetainedEarnings".to_string(), type_: Equity }) ], tokens)
+///        let tokens = tokenizer
+///            .collect::<Result<Vec<Token>, TokenizeError>>()
+///            .unwrap();
+///        assert_eq!(
+///            vec![
+///                Token {
+///                    kind: TokenKind::Date("2023-02-01".to_string()),
+///                    line: 1,
+///                    column: 1
+///                },
+///                Token {
+///                    kind: TokenKind::DirectiveOpen,
+///                    line: 1,
+///                    column: 11
+///                },
+///                Token {
+///                    kind: TokenKind::Account(AccountId {
+///                        name: "RetainedEarnings".to_string(),
+///                        type_: Equity
+///                    }),
+///                    line: 1,
+///                    column: 16
+///                }
+///            ],
+///            tokens
+///        )
 /// ```
 pub struct Tokenizer {
     buffer: String,
@@ -193,8 +226,13 @@ impl Tokenizer {
                 )
             })
         {
+            let (line, column) = self.current_line_column();
             self.cursor += option_line.end();
-            Ok(Some(Token::OptionLine))
+            Ok(Some(Token {
+                kind: TokenKind::OptionLine,
+                line,
+                column,
+            }))
         } else if let Some(comment) = COMMENT_REGEX.find(&self.buffer[self.cursor..]) {
             // we ignore comments
             self.cursor += comment.end();
@@ -203,9 +241,14 @@ impl Tokenizer {
             c.get(1)
                 .expect("if the entire regex matches then the first capture group will not be None")
         }) {
+            let (line, column) = self.current_line_column();
             self.cursor += date.end();
             let date = date.as_str();
-            Ok(Some(Token::Date(date.to_string())))
+            Ok(Some(Token {
+                kind: TokenKind::Date(date.to_string()),
+                line,
+                column,
+            }))
         } else if let Some(captures) = AMOUNT_REGEX.captures(&self.buffer[self.cursor..]) {
             let amount = captures
                 .get(1)
@@ -222,11 +265,16 @@ impl Tokenizer {
                     column,
                 });
             };
+            let (line, column) = self.current_line_column();
             self.cursor += currency.end();
-            Ok(Some(Token::Amount(Amount {
-                currency: currency.as_str().to_string(),
-                amount,
-            })))
+            Ok(Some(Token {
+                kind: TokenKind::Amount(Amount {
+                    currency: currency.as_str().to_string(),
+                    amount,
+                }),
+                line,
+                column,
+            }))
         } else if let Some(directive_open) = DIRECTIVE_OPEN_REGEX
             .captures(&self.buffer[self.cursor..])
             .map(|c| {
@@ -235,8 +283,13 @@ impl Tokenizer {
                 )
             })
         {
+            let (line, column) = self.current_line_column();
             self.cursor += directive_open.end();
-            Ok(Some(Token::DirectiveOpen))
+            Ok(Some(Token {
+                kind: TokenKind::DirectiveOpen,
+                line,
+                column,
+            }))
         } else if let Some(directive_post_tx) = DIRECTIVE_POST_TX_REGEX
             .captures(&self.buffer[self.cursor..])
             .map(|c| {
@@ -245,8 +298,13 @@ impl Tokenizer {
                 )
             })
         {
+            let (line, column) = self.current_line_column();
             self.cursor += directive_post_tx.end();
-            Ok(Some(Token::DirectivePostTx))
+            Ok(Some(Token {
+                kind: TokenKind::DirectivePostTx,
+                line,
+                column,
+            }))
         } else if let Some(full_account) = ACCOUNT_REGEX.captures(&self.buffer[self.cursor..]) {
             let acct_type = full_account
                 .get(1)
@@ -259,13 +317,18 @@ impl Tokenizer {
                 .get(2)
                 .expect("if there was a match there will be a 2 capture group");
 
+            let (line, column) = self.current_line_column();
             self.cursor += acct_name.end();
             let acct_name = acct_name.as_str();
 
-            Ok(Some(Token::Account(AccountId {
-                type_: acct_type,
-                name: acct_name.to_string(),
-            })))
+            Ok(Some(Token {
+                kind: TokenKind::Account(AccountId {
+                    type_: acct_type,
+                    name: acct_name.to_string(),
+                }),
+                line,
+                column,
+            }))
         } else if let Some(currency) =
             CURRENCY_REGEX
                 .captures(&self.buffer[self.cursor..])
@@ -275,8 +338,13 @@ impl Tokenizer {
                     )
                 })
         {
+            let (line, column) = self.current_line_column();
             self.cursor += currency.end();
-            Ok(Some(Token::Currency(currency.as_str().to_string())))
+            Ok(Some(Token {
+                kind: TokenKind::Currency(currency.as_str().to_string()),
+                line,
+                column,
+            }))
         } else if let Some(tx_description) = TX_DESCRIPTION_REGEX
             .captures(&self.buffer[self.cursor..])
             .map(|c| {
@@ -285,17 +353,32 @@ impl Tokenizer {
                 )
             })
         {
+            let (line, column) = self.current_line_column();
             self.cursor += tx_description.end();
-            Ok(Some(Token::TxDescription))
+            Ok(Some(Token {
+                kind: TokenKind::TxDescription,
+                line,
+                column,
+            }))
         } else if let Some(at) = AT_REGEX.captures(&self.buffer[self.cursor..]).map(|c| {
             c.get(1)
                 .expect("if the entire regex matches then the first capture group will not be None")
         }) {
+            let (line, column) = self.current_line_column();
             self.cursor += at.end();
-            Ok(Some(Token::At))
+            Ok(Some(Token {
+                kind: TokenKind::At,
+                line,
+                column,
+            }))
         } else if let Some(newline) = NEWLINE_REGEX.find(&self.buffer[self.cursor..]) {
+            let (line, column) = self.current_line_column();
             self.cursor += newline.end();
-            Ok(Some(Token::Newline))
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line,
+                column,
+            }))
         } else {
             let (line, column) = self.current_line_column();
             Err(TokenizeError {
@@ -313,6 +396,39 @@ mod tests {
     use crate::types::AccountType;
 
     #[test]
+    fn tmp() {
+        use crate::types::AccountType::Equity;
+
+        let tokenizer = Tokenizer::new("2023-02-01 open Equity:RetainedEarnings");
+        let tokens = tokenizer
+            .collect::<Result<Vec<Token>, TokenizeError>>()
+            .unwrap();
+        assert_eq!(
+            vec![
+                Token {
+                    kind: TokenKind::Date("2023-02-01".to_string()),
+                    line: 1,
+                    column: 1
+                },
+                Token {
+                    kind: TokenKind::DirectiveOpen,
+                    line: 1,
+                    column: 11
+                },
+                Token {
+                    kind: TokenKind::Account(AccountId {
+                        name: "RetainedEarnings".to_string(),
+                        type_: Equity
+                    }),
+                    line: 1,
+                    column: 16
+                }
+            ],
+            tokens
+        )
+    }
+
+    #[test]
     fn it_works() {
         let raw = r#"option "operating_currency" "GBP"
 
@@ -327,93 +443,213 @@ mod tests {
 
         let mut tokenizer = Tokenizer::new(raw.to_string());
 
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::OptionLine)),);
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
-
         assert_eq!(
             tokenizer.next_token(),
-            Ok(Some(Token::Date("2023-02-01".to_string())))
-        );
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::DirectiveOpen)));
-
-        assert_eq!(
-            tokenizer.next_token(),
-            Ok(Some(Token::Account(AccountId {
-                type_: AccountType::Equity,
-                name: "RetainedEarnings".to_string()
-            })))
+            Ok(Some(Token {
+                kind: TokenKind::OptionLine,
+                line: 1,
+                column: 1,
+            })),
         );
 
         assert_eq!(
             tokenizer.next_token(),
-            Ok(Some(Token::Currency("GBP".to_string())))
-        );
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
-
-        assert_eq!(
-            tokenizer.next_token(),
-            Ok(Some(Token::Date("2023-02-03".to_string())))
-        );
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::DirectivePostTx)));
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::TxDescription)));
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
-
-        assert_eq!(
-            tokenizer.next_token(),
-            Ok(Some(Token::Account(AccountId {
-                type_: AccountType::Asset,
-                name: "AnAsset".to_string()
-            })))
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 1,
+                column: 33
+            })),
         );
 
         assert_eq!(
             tokenizer.next_token(),
-            Ok(Some(Token::Amount(Amount {
-                currency: "USD".to_string(),
-                amount: "12".parse().expect("hard coded value is a valid decimal")
-            })))
-        );
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::At)));
-
-        assert_eq!(
-            tokenizer.next_token(),
-            Ok(Some(Token::Amount(Amount {
-                currency: "GBP".to_string(),
-                amount: "0.82".parse().expect("hard coded value is a valid decimal")
-            })))
-        );
-
-        assert_eq!(tokenizer.next_token(), Ok(Some(Token::Newline)),);
-
-        assert_eq!(
-            tokenizer.next_token(),
-            Ok(Some(Token::Account(AccountId {
-                type_: AccountType::Income,
-                name: "SomeIncome".to_string()
-            })))
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 2,
+                column: 1
+            })),
         );
 
         assert_eq!(
             tokenizer.next_token(),
-            Ok(Some(Token::Amount(Amount {
-                currency: "GBP".to_string(),
-                amount: "-9000.84"
-                    .parse()
-                    .expect("hard coded value is a valid decimal")
-            })))
+            Ok(Some(Token {
+                kind: TokenKind::Date("2023-02-01".to_string()),
+                line: 3,
+                column: 1,
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::DirectiveOpen,
+                line: 3,
+                column: 12
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Account(AccountId {
+                    type_: AccountType::Equity,
+                    name: "RetainedEarnings".to_string()
+                }),
+                line: 3,
+                column: 17
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Currency("GBP".to_string()),
+                line: 3,
+                column: 54
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 3,
+                column: 57,
+            })),
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 4,
+                column: 1
+            })),
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 7,
+                column: 1
+            })),
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Date("2023-02-03".to_string()),
+                line: 8,
+                column: 1
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::DirectivePostTx,
+                line: 8,
+                column: 12
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::TxDescription,
+                line: 8,
+                column: 14
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 8,
+                column: 39
+            })),
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Account(AccountId {
+                    type_: AccountType::Asset,
+                    name: "AnAsset".to_string()
+                }),
+                line: 9,
+                column: 3
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Amount(Amount {
+                    currency: "USD".to_string(),
+                    amount: "12".parse().expect("hard coded value is a valid decimal")
+                }),
+                line: 9,
+                column: 52
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::At,
+                line: 9,
+                column: 59
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Amount(Amount {
+                    currency: "GBP".to_string(),
+                    amount: "0.82".parse().expect("hard coded value is a valid decimal")
+                }),
+                line: 9,
+                column: 61
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 9,
+                column: 69
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Account(AccountId {
+                    type_: AccountType::Income,
+                    name: "SomeIncome".to_string()
+                }),
+                line: 10,
+                column: 3
+            }))
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Amount(Amount {
+                    currency: "GBP".to_string(),
+                    amount: "-9000.84"
+                        .parse()
+                        .expect("hard coded value is a valid decimal")
+                }),
+                line: 10,
+                column: 57
+            }))
         );
 
         assert!(
