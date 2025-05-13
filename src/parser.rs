@@ -59,6 +59,17 @@ pub fn parse(
     let mut tokenizer = tokenizer.into_iter();
     let mut accounts_doc = AccountsDocument::new();
 
+    //TODO: handle newlines at start of file
+    let line = 0;
+    let column = 0;
+    let (_, _, _) = expect_token!(
+        tokenizer,
+        TokenKind::OptionLine => (),
+        "expected option line",
+        line,
+        column
+    );
+
     // transactions or open directive loop
     'tx_open_loop: while let Some(token) = tokenizer.next().transpose()? {
         if token.kind == TokenKind::Newline {
@@ -196,14 +207,6 @@ pub fn parse(
                             line,
                             column,
                         }) => {
-                            let (amount, line, column) = expect_token!(
-                                tokenizer,
-                                TokenKind::Amount(amount) => amount,
-                                "expected amount",
-                                line,
-                                column
-                            );
-
                             let (conversion, _, _) = expect_token!(
                                 tokenizer,
                                 TokenKind::Amount(conversion) => conversion,
@@ -283,8 +286,8 @@ pub fn parse(
                 // (this is because we've parsed a date up to this point).
                 return Err(ParseError {
                     msg: "expected either open or post transaction directive".to_string(),
-                    line: token.line,
-                    column: token.column,
+                    line,
+                    column,
                 });
             }
         }
@@ -305,6 +308,16 @@ mod tests {
     #[test]
     fn happy_path() {
         let mut tokens = vec![];
+        tokens.push(Ok(Token {
+            kind: TokenKind::OptionLine,
+            line: 0,
+            column: 0,
+        }));
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
         add_open_account_tokens(
             &mut tokens,
             "1912-01-12",
@@ -323,6 +336,18 @@ mod tests {
             AccountType::Asset,
             "another account",
             "GBP",
+        );
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
+        add_open_account_tokens(
+            &mut tokens,
+            "1912-01-12",
+            AccountType::Asset,
+            "yet another account",
+            "EUR",
         );
         tokens.push(Ok(Token {
             kind: TokenKind::Newline,
@@ -354,9 +379,23 @@ mod tests {
         }));
         add_post_tokens(
             &mut tokens,
-            "-6.45".parse().expect("hard coded value will parse"),
+            "-3.45".parse().expect("hard coded value will parse"),
             AccountType::Asset,
             "account name",
+            "GBP",
+        );
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
+        add_conversion_post_tokens(
+            &mut tokens,
+            "-1.5".parse().expect("hard coded value will parse"),
+            AccountType::Asset,
+            "yet another account",
+            "EUR",
+            "2".parse().expect("hard coded value will parse"),
             "GBP",
         );
 
@@ -380,9 +419,63 @@ mod tests {
                     },
                     currency: "GBP".to_string(),
                     opening_date: date! {1912-01-12}
+                },
+                Account {
+                    id: AccountId {
+                        name: "yet another account".to_string(),
+                        type_: crate::types::AccountType::Asset
+                    },
+                    currency: "EUR".to_string(),
+                    opening_date: date! {1912-01-12}
                 }
             ]
-        )
+        );
+
+        let mut balances = accts.balances();
+
+        assert_eq!(
+            balances.next(),
+            Some((
+                &AccountId {
+                    name: "account name".to_string(),
+                    type_: AccountType::Asset,
+                },
+                Amount {
+                    amount: "-3.45".parse().expect("hard coded value will parse"),
+                    currency: "GBP".to_string(),
+                }
+            ))
+        );
+
+        assert_eq!(
+            balances.next(),
+            Some((
+                &AccountId {
+                    name: "another account".to_string(),
+                    type_: AccountType::Asset,
+                },
+                Amount {
+                    amount: "6.45".parse().expect("hard coded value will parse"),
+                    currency: "GBP".to_string(),
+                }
+            ))
+        );
+
+        assert_eq!(
+            balances.next(),
+            Some((
+                &AccountId {
+                    name: "yet another account".to_string(),
+                    type_: AccountType::Asset,
+                },
+                Amount {
+                    amount: "-1.5".parse().expect("hard coded value will parse"),
+                    currency: "EUR".to_string(),
+                }
+            ))
+        );
+
+        assert_eq!(balances.next(), None);
     }
 
     fn add_open_account_tokens(
@@ -466,6 +559,50 @@ mod tests {
                 kind: TokenKind::Amount(Amount {
                     currency: currency.into(),
                     amount,
+                }),
+                line: 0,
+                column: 0,
+            }),
+        ];
+
+        tokens.append(&mut open);
+    }
+
+    fn add_conversion_post_tokens(
+        tokens: &mut Vec<Result<Token, TokenizeError>>,
+        amount: Decimal,
+        account_type: AccountType,
+        account_name: impl Into<String>,
+        currency: impl Into<String>,
+        conversion_amount: Decimal,
+        conversion_currency: impl Into<String>,
+    ) {
+        let mut open = vec![
+            Ok(Token {
+                kind: TokenKind::Account(crate::types::AccountId {
+                    type_: account_type,
+                    name: account_name.into(),
+                }),
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::Amount(Amount {
+                    currency: currency.into(),
+                    amount,
+                }),
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::At,
+                line: 0,
+                column: 0,
+            }),
+            Ok(Token {
+                kind: TokenKind::Amount(Amount {
+                    currency: conversion_currency.into(),
+                    amount: conversion_amount,
                 }),
                 line: 0,
                 column: 0,

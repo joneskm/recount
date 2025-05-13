@@ -29,16 +29,17 @@ static DIRECTIVE_POST_TX_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^(\*)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
 
 static ACCOUNT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^(Assets|Liabilities|Expenses|Income|Equity):([A-Z][A-Za-z]+)(?:[ \t\n\r]|$)"#)
-        .expect("hard coded regex is valid")
+    Regex::new(
+        r#"^(Assets|Liabilities|Expenses|Income|Equity):([A-Z][A-Za-z0-9-]+)(?:[ \t\n\r]|$)"#,
+    )
+    .expect("hard coded regex is valid")
 });
 
 static CURRENCY_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"^([A-Z]+)(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid"));
 
-// we consume the newline at the end of a comment because it's part of the definition
 static COMMENT_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"^;.*(?:\r?\n|$)"#).expect("hard coded regex is valid"));
+    LazyLock::new(|| Regex::new(r#"^;[^\r\n]*"#).expect("hard coded regex is valid"));
 
 static TX_DESCRIPTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^("[^"]+")(?:[ \t\n\r]|$)"#).expect("hard coded regex is valid")
@@ -194,6 +195,8 @@ impl Tokenizer {
             // before it has index zero). So if the cursor is immediately to the right of a newline
             // character the line_start_index will be one less than the cursor value. Subtraction
             // would then give a value of one which is the correct column value.
+            // TODO: this gives the number of bytes not the number of graphemes or even unicode
+            // points
             self.cursor - line_start_index
         }
     }
@@ -432,7 +435,7 @@ mod tests {
     fn it_works() {
         let raw = r#"option "operating_currency" "GBP"
 
-2023-02-01 open Equity:RetainedEarnings              GBP
+2023-02-01 open Equity:RetainedEarnings              GBP ; a comment
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; An account entry
@@ -514,7 +517,7 @@ mod tests {
             Ok(Some(Token {
                 kind: TokenKind::Newline,
                 line: 3,
-                column: 57,
+                column: 69,
             })),
         );
 
@@ -524,6 +527,24 @@ mod tests {
                 kind: TokenKind::Newline,
                 line: 4,
                 column: 1
+            })),
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 5,
+                column: 40
+            })),
+        );
+
+        assert_eq!(
+            tokenizer.next_token(),
+            Ok(Some(Token {
+                kind: TokenKind::Newline,
+                line: 6,
+                column: 19
             })),
         );
 
