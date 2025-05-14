@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::types::{AccountId, Amount};
 
-/// An account in the `AccountsDocument`.
+/// Represents an account in the [`AccountsDocument`].
 #[derive(Debug)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct Account {
@@ -13,7 +13,7 @@ pub struct Account {
     pub(crate) opening_date: Date,
 }
 
-/// An iterator over accounts and balances
+/// An iterator over accounts and balances returned by [`AccountsDocument::balances`].
 #[cfg_attr(test, derive(Debug))]
 pub struct AccountBalances<'a> {
     accounts_doc: &'a AccountsDocument,
@@ -40,90 +40,145 @@ impl<'a> Iterator for AccountBalances<'a> {
     }
 }
 
-/// Used by `Posting` to convert a posting's currency to a transaction's currency.
+/// Represents a regular beancount posting, where the account currency and the transaction currency
+/// are the same. Regular postings take the form:
+/// ```beancount
+/// Assets:BankChecking     1000.00 GBP
+/// ```
 #[derive(Debug)]
-pub struct CurrencyConverter {
-    pub(crate) currency: String,
-    pub(crate) rate: Decimal,
-}
-
-/// A transaction posting. The currency should match the currency of the account with id `account_id`
-/// when calling `AccountsDocument::add_transaction`. A `converter` is required when the posting is
-/// included in a transaction with a different currency to the posting's currency.
-#[derive(Debug)]
-pub struct Posting {
+pub struct RegularPosting {
     pub(crate) account_id: AccountId,
     pub(crate) amount: Decimal,
     pub(crate) currency: String,
-    pub(crate) converter: Option<CurrencyConverter>,
+}
+
+/// Represents a posting to an account with a different currency to the transaction currency.
+/// Conversion postings take the form:
+/// ```beancount
+/// Assets:BankCheckingEUR 100 EUR @ 0.8 GBP
+/// ```
+#[derive(Debug)]
+pub struct ConversionPosting {
+    pub(crate) account_id: AccountId,
+    pub(crate) account_amount: Decimal,
+    pub(crate) account_currency: String,
+    pub(crate) rate: Decimal,
+    pub(crate) tx_currency: String,
+}
+
+/// Represents the three different types of posting.
+#[derive(Debug)]
+pub enum Posting {
+    Auto(AccountId),
+    Regular(RegularPosting),
+    Conversion(ConversionPosting),
+}
+
+/// Posting information for [`Posting::Regular`] and [`Posting::Conversion`]
+struct PostingInfo {
+    account_currency: String,
+    tx_amount: Decimal,
+    tx_currency: String,
 }
 
 impl Posting {
-    fn resolved_currency(&self) -> &String {
-        self.converter
-            .as_ref()
-            .map_or(&self.currency, |c| &c.currency)
+    /// Returns the [`AccountId`] unless the posting is an auto-posting in which case [`None`]
+    /// is returned.
+    pub fn account_id(&self) -> &AccountId {
+        match self {
+            Posting::Auto(id) => id,
+            Posting::Regular(posting) => &posting.account_id,
+            Posting::Conversion(posting) => &posting.account_id,
+        }
     }
 
-    fn resolved_amount(&self) -> Decimal {
-        self.converter
-            .as_ref()
-            .map_or(self.amount.clone(), |c| c.rate * self.amount)
+    /// Returns the account amount unless the posting is an auto-posting in which case [`None`]
+    /// is returned.
+    pub fn account_amount(&self) -> Option<Decimal> {
+        match self {
+            Posting::Auto(_) => None,
+            Posting::Regular(posting) => Some(posting.amount),
+            Posting::Conversion(posting) => Some(posting.account_amount),
+        }
+    }
+
+    /// Returns  [`Some`] containing a [`PostingInfo`] for [`Posting::Regular`] and
+    /// [`Posting::Conversion`], Returns [`None`] for a [`Posting::Auto`].
+    fn info(&self) -> Option<PostingInfo> {
+        match self {
+            Posting::Auto(_) => None,
+            Posting::Regular(posting) => Some(PostingInfo {
+                account_currency: posting.currency.clone(),
+                tx_amount: posting.amount,
+                tx_currency: posting.currency.clone(),
+            }),
+            Posting::Conversion(posting) => {
+                let tx_amount = posting.account_amount * posting.rate;
+
+                Some(PostingInfo {
+                    account_currency: posting.account_currency.clone(),
+                    tx_amount,
+                    tx_currency: posting.tx_currency.clone(),
+                })
+            }
+        }
     }
 }
 
-/// A transaction.
+/// A [`Transaction`] is a collection of [`Posting`]s with some metadata. The following conditions
+/// are guaranteed to be true for all [`Transaction`] instances:
+/// 1. All regular postings have the same currency.
+/// 2. All conversion postings have the same conversion currency and the same currency as regular
+///    postings.
+/// 3. There is at most one auto posting.
+/// 4. The account id in regular postings corresponds to an open account, with the same currency.
+/// 5. The account id in a conversion posting corresponds to an open account with the same (pre
+///    conversion) currency.
+/// 6, The account id in an auto-posting corresponds to an open account, If the transaction
+/// contains other postings then the currency of the account will be the same as the currency of
+/// all regular postings and the converted to currency of all conversion postings.
+/// 7. For transactions with no auto-posting the sum of all amounts (converted amounts in the case
+///    of conversion postings) will be zero i.e. the transaction will be balanced.
+/// It isn't possible to create a [`Transaction`] directly however the
+/// [`AccountsDocument::add_transaction`] method provides an indirect method of creating a
+/// [`Transaction`]. This method guarantees that all the above requirements are satisfied before
+/// creating and adding the transaction to the accounts document.
+///
+/// The order in which [`Posting`]s are passed to the [`AccountsDocument::add_transaction`] is
+/// preserved. This is useful when writing an [`AccountsDocument`] to a file and a particular order
+/// is required.
 #[derive(Debug)]
 pub struct Transaction {
-    date: Date,
+    _date: Date,
     _description: String,
-    currency: Option<String>,
-    postings: Vec<Posting>, // use a vec to preserve the read order
+    balance: Decimal, // this can only be non zero if the transaction contains an auto-posting
+    postings: Vec<Posting>, // use a vec to preserve the order
 }
 
 impl Transaction {
-    pub fn new(date: Date, description: impl Into<String>) -> Transaction {
-        Transaction {
-            date,
-            _description: description.into(),
-            currency: None,
-            postings: vec![],
-        }
-    }
+    /// For a given `account` returns the sum of all postings to that account in the account
+    /// currency. If there's an auto-posting to `account` then the posting amount is given by the
+    /// amount required to balance the transaction.
+    pub fn balance(&self, account: &AccountId) -> Option<Decimal> {
+        let filtered: Vec<&Posting> = self
+            .postings
+            .iter()
+            .filter(|&p| p.account_id() == account)
+            .collect();
 
-    /// Adds a post to the transaction. If the transaction's currency is set then we check that the
-    /// post resolves to the same currency (i.e. the posting either contains a conversion to the
-    /// transaction currency or has no conversion but is already in the transaction currency). If
-    /// the transaction's currency is not set (i.e. it has no postings) then we set it to the
-    /// posting's resolved currency.
-    pub fn add_posting(&mut self, posting: Posting) -> Result<(), AddPostingError> {
-        let post_currency = posting.resolved_currency();
-        match &self.currency {
-            Some(c) => {
-                if c == post_currency {
-                    self.postings.push(posting);
-                    Ok(())
-                } else {
-                    Err(AddPostingError::IncorrectCurrency)
-                }
-            }
-            None => {
-                self.currency = Some(post_currency.to_string());
-                self.postings.push(posting);
-                Ok(())
-            }
+        if filtered.is_empty() {
+            return None;
         }
+
+        Some(filtered.iter().fold(Decimal::ZERO, |s, p| {
+            s + p.account_amount().unwrap_or_else(|| -self.balance) // NOTE: if there's an auto
+            // posting it's account_currency is guaranteed to be the same as the
+            // transaction_currency.
+        }))
     }
 }
 
-/// The error returned by `Transaction::add_posting`.
-#[derive(Error, Debug, PartialEq)]
-pub enum AddPostingError {
-    #[error("currency does not match")]
-    IncorrectCurrency,
-}
-
-/// This is an in memory representation of a text accounts document. The document will preserve
+/// This is an in memory representation of a beancount accounts document. The document will preserve
 /// the order which transactions and postings appear when constructed from a file.
 #[cfg_attr(test, derive(Debug))]
 pub struct AccountsDocument {
@@ -139,8 +194,8 @@ impl AccountsDocument {
         }
     }
 
-    /// Add an account to the document. Returns an error if an account with the same ID
-    /// already exists.
+    /// Add an [`Account`] to the document. Returns an [`OpenAccountError`] if an account with the
+    /// same [`AccountId`] already exists.
     pub fn open_an_account(&mut self, account: Account) -> Result<(), OpenAccountError> {
         if self.accounts.iter().any(|a| a.id == account.id) {
             Err(OpenAccountError::AccountAlreadyExists)
@@ -150,33 +205,68 @@ impl AccountsDocument {
         }
     }
 
-    /// Add a transaction to the document. The transaction must:
-    /// 1. Be balanced - the sum of all postings must equal zero.
-    /// 2. Every account must be open and in the correct currency.
-    /// If these conditions are not satisfied an error is returned.
-    pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), AddTransactionError> {
-        // TODO: what if an account is added later which is dated before a transaction (causing it
-        // to fail)?
-
+    /// Adds a [`Transaction`] to the document if the [`Transaction`] defined by the arguments is
+    /// valid.
+    pub fn add_transaction(
+        &mut self,
+        date: Date,
+        description: impl Into<String>,
+        postings: Vec<Posting>,
+    ) -> Result<(), AddTransactionError> {
         let mut running_total = Decimal::ZERO;
-        for posting in &transaction.postings {
-            let Some(account) = self.find_account(&posting.account_id) else {
+        let mut auto_posting: Option<(&Posting, &Account)> = None;
+        let mut currency: Option<String> = None;
+        for posting in &postings {
+            let Some(account) = self.find_account(&posting.account_id()) else {
                 return Err(AddTransactionError::AccountNotFound);
             };
-            if transaction.date < account.opening_date {
+            if date < account.opening_date {
                 return Err(AddTransactionError::AccountNotOpen);
             }
-            if account.currency != posting.currency {
-                return Err(AddTransactionError::IncorrectCurrency);
+
+            if let Some(post_info) = posting.info() {
+                // We now know this posting isn't an auto-posting
+                if account.currency != post_info.account_currency {
+                    return Err(AddTransactionError::IncorrectAccountCurrency);
+                }
+
+                match &mut currency {
+                    Some(c) if c == &post_info.tx_currency => c,
+                    Some(_) => return Err(AddTransactionError::IncorrectTransactionCurrency),
+                    None => currency.insert(post_info.tx_currency),
+                };
+
+                running_total += post_info.tx_amount;
+            } else {
+                if auto_posting.is_some() {
+                    return Err(AddTransactionError::MoreThanOneAutoPosting);
+                }
+
+                let _ = auto_posting.insert((posting, account));
             }
-            running_total += posting.resolved_amount();
         }
 
-        if running_total != Decimal::ZERO {
-            return Err(AddTransactionError::NotBalanced);
-        }
+        if let Some((_, account)) = auto_posting {
+            // We have an auto-posting, we must check that the account posted to has the same
+            // currency as the transaction currency. If there is no transaction currency (which can
+            // happen if this is the only posting), then the transaction currency **is** the
+            // posting currency so all is good.
+            if currency.is_some_and(|c| c != account.currency) {
+                return Err(AddTransactionError::IncorrectTransactionCurrency);
+            }
+        } else {
+            // If there is no auto-posting then the tx must balance
+            if running_total != Decimal::ZERO {
+                return Err(AddTransactionError::NotBalanced);
+            }
+        };
 
-        self.transactions.push(transaction);
+        self.transactions.push(Transaction {
+            _date: date,
+            _description: description.into(),
+            balance: running_total,
+            postings,
+        });
 
         Ok(())
     }
@@ -189,21 +279,18 @@ impl AccountsDocument {
         self.accounts.iter().any(|a| &a.id == account)
     }
 
-    /// Returns the balance of `account`. Returns `None` if the account doesn't exist.
+    /// Returns the balance of `account`it it exists otherwise returns [`None`].
     pub fn balance(&self, account: &AccountId) -> Option<Decimal> {
         if !self.account_exists(account) {
             return None;
         };
 
         Some(self.transactions.iter().fold(Decimal::ZERO, |s, t| {
-            t.postings
-                .iter()
-                .filter(|&p| &p.account_id == account)
-                .fold(s, |sp, p| sp + p.amount)
+            s + t.balance(account).unwrap_or(Decimal::ZERO)
         }))
     }
 
-    /// Returns an iterator over all accounts and balances.
+    /// Returns an [`AccountBalances`] iterator over all accounts.
     pub fn balances(&self) -> AccountBalances {
         AccountBalances {
             accounts_doc: self,
@@ -212,20 +299,24 @@ impl AccountsDocument {
     }
 }
 
-/// The error returned by `AccountsDocument::add_transaction`.
+/// The error returned by [`AccountsDocument::add_transaction`].
 #[derive(Error, Debug, PartialEq)]
 pub enum AddTransactionError {
     #[error("account not found")]
     AccountNotFound,
     #[error("account not open")]
     AccountNotOpen,
-    #[error("incorrect currency")]
-    IncorrectCurrency,
+    #[error("the postings have different transaction currencies")]
+    IncorrectTransactionCurrency,
+    #[error("the account currency is incorect")]
+    IncorrectAccountCurrency,
     #[error("transaction is not balanced")]
     NotBalanced,
+    #[error("only one auto posting is allowed per transaction")]
+    MoreThanOneAutoPosting,
 }
 
-/// The error returned by `AccountsDocument::open_an_account`.
+/// The error returned by [`AccountsDocument::open_an_account`].
 #[derive(Error, Debug, PartialEq)]
 pub enum OpenAccountError {
     #[error("account already exists")]
@@ -247,7 +338,7 @@ mod tests {
             type_: AccountType::Income,
         });
 
-        assert_eq!(sum, Some(Decimal::ONE));
+        assert_eq!(sum, Some(100.into()));
     }
 
     #[test]
@@ -263,7 +354,7 @@ mod tests {
                     type_: AccountType::Income,
                 },
                 Amount {
-                    amount: Decimal::ONE,
+                    amount: 100.into(),
                     currency: "GBP".to_string(),
                 }
             ))
@@ -277,8 +368,36 @@ mod tests {
                     type_: AccountType::Income,
                 },
                 Amount {
-                    amount: Decimal::ONE,
+                    amount: (-50).into(),
                     currency: "USD".to_string(),
+                }
+            ))
+        );
+
+        assert_eq!(
+            balances.next(),
+            Some((
+                &AccountId {
+                    name: "AccountC".to_string(),
+                    type_: AccountType::Income,
+                },
+                Amount {
+                    amount: (0).into(),
+                    currency: "GBP".to_string(),
+                }
+            ))
+        );
+
+        assert_eq!(
+            balances.next(),
+            Some((
+                &AccountId {
+                    name: "AccountD".to_string(),
+                    type_: AccountType::Income,
+                },
+                Amount {
+                    amount: (-50).into(),
+                    currency: "GBP".to_string(),
                 }
             ))
         );
@@ -314,259 +433,276 @@ mod tests {
     }
 
     #[test]
-    fn add_posting_works() {
-        // We create an transaction with no postings. Then add an initial posting. This can't fail
-        // because the transaction has no currency. We then add four more postings covering the
-        // four cases:
-        // - correct currency
-        // - incorrect currency
-        // - correct resolved currency
-        // - incorrect resolved currency
-        let mut transaction = Transaction {
-            date: date! {2012-05-13},
-            _description: "a description".to_string(),
-            currency: None,
-            postings: vec![],
-        };
-
-        transaction
-            .add_posting(Posting {
-                account_id: AccountId {
-                    name: "account 1".to_string(),
-                    type_: AccountType::Asset,
-                },
-                amount: 100.into(),
-                currency: "GBP".to_string(),
-                converter: Some(CurrencyConverter {
-                    currency: "USD".to_string(),
-                    rate: dec!(1.5),
-                }),
-            })
-            .expect("this can't fail beacuase the tx doesn't yet have a currency");
-
-        assert_eq!(transaction.currency, Some("USD".to_string()));
-
-        transaction
-            .add_posting(Posting {
-                account_id: AccountId {
-                    name: "account 2".to_string(),
-                    type_: AccountType::Asset,
-                },
-                amount: 50.into(),
-                currency: "USD".to_string(),
-                converter: None,
-            })
-            .expect("this is in the same currency as the tx so it won't fail");
-
-        let err = transaction
-            .add_posting(Posting {
-                account_id: AccountId {
-                    name: "account 3".to_string(),
-                    type_: AccountType::Asset,
-                },
-                amount: 90.into(),
-                currency: "GBP".to_string(),
-                converter: None,
-            })
-            .unwrap_err();
-
-        assert_eq!(err, AddPostingError::IncorrectCurrency);
-
-        transaction
-            .add_posting(Posting {
-                account_id: AccountId {
-                    name: "account 4".to_string(),
-                    type_: AccountType::Asset,
-                },
-                amount: 10.into(),
-                currency: "EUR".to_string(),
-                converter: Some(CurrencyConverter {
-                    currency: "USD".to_string(),
-                    rate: dec!(1.7),
-                }),
-            })
-            .expect("this can't fail beacuase the posting resolves to the same currency as the tx");
-
-        let err = transaction
-            .add_posting(Posting {
-                account_id: AccountId {
-                    name: "account 1".to_string(),
-                    type_: AccountType::Asset,
-                },
-                amount: 100.into(),
-                currency: "GBP".to_string(),
-                converter: Some(CurrencyConverter {
-                    currency: "EUR".to_string(),
-                    rate: dec!(1.5),
-                }),
-            })
-            .unwrap_err();
-
-        assert_eq!(err, AddPostingError::IncorrectCurrency)
-    }
-    #[test]
     fn add_transaction_works() {
-        // We test the happy path followed by a test for each error variant:
+        // We test two happy paths:
+        // - One regular posting and one conversion posting. The tx is balanced so this should
+        // work.
+        // - Same as above (except it's not balanced) plus an auto-posting (which should "balance"
+        // the tx).
+        // Followed by a test for each error variant:
         // - AccountNotFound
         // - AccountNotOpen
-        // - IncorrectCurrency
+        // - IncorrectTransactionCurrency
+        // - IncorrectAccountCurrency
         // - NotBalanced
+        // - MoreThanOneAutoPosting
+
         accounts_doc()
-            .add_transaction(Transaction {
-                date: date! {2012-05-13},
-                _description: "Another Tx".to_string(),
-                currency: Some("GBP".to_string()),
-                postings: vec![
-                    Posting {
+            .add_transaction(
+                date! {2012-05-13},
+                "Another Tx",
+                vec![
+                    Posting::Regular(RegularPosting {
                         account_id: AccountId {
                             name: "AccountA".to_string(),
                             type_: AccountType::Income,
                         },
                         amount: 100.into(),
                         currency: "GBP".to_string(),
-                        converter: None,
-                    },
-                    Posting {
+                    }),
+                    Posting::Conversion(ConversionPosting {
                         account_id: AccountId {
                             name: "AccountB".to_string(),
                             type_: AccountType::Income,
                         },
-                        amount: (-100_i8).into(),
-                        currency: "USD".to_string(),
-                        converter: Some(CurrencyConverter {
-                            currency: "GBP".into(),
-                            rate: 1.into(),
-                        }),
-                    },
+                        account_amount: (-100_i8).into(),
+                        account_currency: "USD".to_string(),
+                        tx_currency: "GBP".into(),
+                        rate: 1.into(),
+                    }),
                 ],
-            })
+            )
             .expect("won't return an error");
 
+        let mut doc = accounts_doc();
+        doc.add_transaction(
+            date! {2012-05-13},
+            "Another Tx",
+            vec![
+                Posting::Regular(RegularPosting {
+                    account_id: AccountId {
+                        name: "AccountA".to_string(),
+                        type_: AccountType::Income,
+                    },
+                    amount: 100.into(),
+                    currency: "GBP".to_string(),
+                }),
+                Posting::Conversion(ConversionPosting {
+                    account_id: AccountId {
+                        name: "AccountB".to_string(),
+                        type_: AccountType::Income,
+                    },
+                    account_amount: (-50_i8).into(),
+                    account_currency: "USD".to_string(),
+                    tx_currency: "GBP".into(),
+                    rate: 1.into(),
+                }),
+                Posting::Auto(AccountId {
+                    name: "AccountD".to_string(),
+                    type_: AccountType::Income,
+                }),
+            ],
+        )
+        .expect("won't return an error");
+        assert_eq!(
+            doc.balance(&AccountId {
+                name: "AccountD".to_string(),
+                type_: AccountType::Income,
+            }),
+            Some((-100).into()) // -100 because the balance was -50 before we added this tx
+        );
+
         let err = accounts_doc()
-            .add_transaction(Transaction {
-                date: date! {2012-05-13},
-                _description: "Another Tx".to_string(),
-                currency: Some("GBP".to_string()),
-                postings: vec![
-                    Posting {
+            .add_transaction(
+                date! {2012-05-13},
+                "Another Tx",
+                vec![
+                    Posting::Regular(RegularPosting {
                         account_id: AccountId {
                             name: "AccountA".to_string(),
                             type_: AccountType::Income,
                         },
                         amount: 100.into(),
                         currency: "GBP".to_string(),
-                        converter: None,
-                    },
-                    Posting {
+                    }),
+                    Posting::Conversion(ConversionPosting {
                         account_id: AccountId {
                             name: "AccountB".to_string(),
                             type_: AccountType::Asset, // There is no account named "AccountB" with
                                                        // type Asset (there is an "AccountB" with type Income).
                         },
-                        amount: (-100_i8).into(),
-                        currency: "USD".to_string(),
-                        converter: Some(CurrencyConverter {
-                            currency: "GBP".into(),
-                            rate: 1.into(),
-                        }),
-                    },
+                        account_amount: (-100_i8).into(),
+                        account_currency: "USD".to_string(),
+                        tx_currency: "GBP".into(),
+                        rate: 1.into(),
+                    }),
                 ],
-            })
+            )
             .unwrap_err();
         assert_eq!(err, AddTransactionError::AccountNotFound);
 
         let err = accounts_doc()
-            .add_transaction(Transaction {
-                date: date! {2012-04-11}, // this is before the accounts were opened
-                _description: "Another Tx".to_string(),
-                currency: Some("GBP".to_string()),
-                postings: vec![
-                    Posting {
+            .add_transaction(
+                date! {2012-04-11}, // this is before the accounts were opened
+                "Another Tx",
+                vec![
+                    Posting::Regular(RegularPosting {
                         account_id: AccountId {
                             name: "AccountA".to_string(),
                             type_: AccountType::Income,
                         },
                         amount: 100.into(),
                         currency: "GBP".to_string(),
-                        converter: None,
-                    },
-                    Posting {
+                    }),
+                    Posting::Conversion(ConversionPosting {
                         account_id: AccountId {
                             name: "AccountB".to_string(),
                             type_: AccountType::Income,
                         },
-                        amount: (-100_i8).into(),
-                        currency: "USD".to_string(),
-                        converter: Some(CurrencyConverter {
-                            currency: "GBP".into(),
-                            rate: 1.into(),
-                        }),
-                    },
+                        account_amount: (-100_i8).into(),
+                        account_currency: "USD".to_string(),
+                        tx_currency: "GBP".into(),
+                        rate: 1.into(),
+                    }),
                 ],
-            })
+            )
             .unwrap_err();
         assert_eq!(err, AddTransactionError::AccountNotOpen);
 
         let err = accounts_doc()
-            .add_transaction(Transaction {
-                date: date! {2012-05-13},
-                _description: "Another Tx".to_string(),
-                currency: Some("GBP".to_string()),
-                postings: vec![
-                    Posting {
+            .add_transaction(
+                date! {2012-05-13},
+                "Another Tx",
+                vec![
+                    Posting::Regular(RegularPosting {
                         account_id: AccountId {
                             name: "AccountA".to_string(),
                             type_: AccountType::Income,
                         },
                         amount: 100.into(),
                         currency: "GBP".to_string(),
-                        converter: None,
-                    },
-                    Posting {
+                    }),
+                    Posting::Conversion(ConversionPosting {
+                        account_id: AccountId {
+                            name: "AccountB".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        account_amount: (-100_i8).into(),
+                        account_currency: "USD".to_string(),
+                        tx_currency: "EUR".into(),
+                        rate: 1.into(),
+                    }),
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(err, AddTransactionError::IncorrectTransactionCurrency);
+
+        let err = accounts_doc()
+            .add_transaction(
+                date! {2012-05-13},
+                "Another Tx",
+                vec![
+                    Posting::Regular(RegularPosting {
+                        account_id: AccountId {
+                            name: "AccountA".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: 100.into(),
+                        currency: "GBP".to_string(),
+                    }),
+                    Posting::Regular(RegularPosting {
                         account_id: AccountId {
                             name: "AccountB".to_string(),
                             type_: AccountType::Income,
                         },
                         amount: (-100_i8).into(),
                         currency: "GBP".to_string(), // this doesn't match the account currency
-                        converter: None,
-                    },
+                    }),
                 ],
-            })
+            )
             .unwrap_err();
-        assert_eq!(err, AddTransactionError::IncorrectCurrency);
+        assert_eq!(err, AddTransactionError::IncorrectAccountCurrency);
 
         let err = accounts_doc()
-            .add_transaction(Transaction {
-                date: date! {2012-05-13},
-                _description: "Another Tx".to_string(),
-                currency: Some("GBP".to_string()),
-                postings: vec![
-                    Posting {
+            .add_transaction(
+                date! {2012-05-13},
+                "Another Tx",
+                vec![
+                    Posting::Regular(RegularPosting {
                         account_id: AccountId {
                             name: "AccountA".to_string(),
                             type_: AccountType::Income,
                         },
                         amount: 100.into(),
                         currency: "GBP".to_string(),
-                        converter: None,
-                    },
-                    Posting {
+                    }),
+                    Posting::Conversion(ConversionPosting {
                         account_id: AccountId {
                             name: "AccountB".to_string(),
                             type_: AccountType::Income,
                         },
-                        amount: (-100_i8).into(),
-                        currency: "USD".to_string(),
-                        converter: Some(CurrencyConverter {
-                            currency: "GBP".into(),
-                            rate: dec!(1.1),
-                        }),
-                    },
+                        account_amount: (-100_i8).into(),
+                        account_currency: "USD".to_string(),
+                        tx_currency: "GBP".into(),
+                        rate: dec!(1.1),
+                    }),
                 ],
-            })
+            )
             .unwrap_err();
         assert_eq!(err, AddTransactionError::NotBalanced);
+
+        let err = accounts_doc()
+            .add_transaction(
+                date! {2012-05-13},
+                "Another Tx",
+                vec![
+                    Posting::Regular(RegularPosting {
+                        account_id: AccountId {
+                            name: "AccountA".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: 100.into(),
+                        currency: "GBP".to_string(),
+                    }),
+                    Posting::Auto(AccountId {
+                        name: "AccountC".to_string(),
+                        type_: AccountType::Income,
+                    }),
+                    Posting::Auto(AccountId {
+                        name: "AccountD".to_string(),
+                        type_: AccountType::Income,
+                    }),
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(err, AddTransactionError::MoreThanOneAutoPosting);
+    }
+
+    #[test]
+    fn auto_posting_incorrect_currency() {
+        // An auto-posting account must have the same currency as the transaction currency
+
+        let err = accounts_doc()
+            .add_transaction(
+                date! {2012-05-13},
+                "Another Tx",
+                vec![
+                    Posting::Regular(RegularPosting {
+                        account_id: AccountId {
+                            name: "AccountA".to_string(),
+                            type_: AccountType::Income,
+                        },
+                        amount: 100.into(),
+                        currency: "GBP".to_string(),
+                    }),
+                    Posting::Auto(AccountId {
+                        name: "AccountB".to_string(),
+                        type_: AccountType::Income,
+                    }),
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(err, AddTransactionError::IncorrectTransactionCurrency);
     }
 
     fn accounts_doc() -> AccountsDocument {
@@ -588,34 +724,51 @@ mod tests {
                     opening_date: date! {2012-04-12},
                     currency: "USD".to_string(),
                 },
+                Account {
+                    id: AccountId {
+                        name: "AccountC".to_string(),
+                        type_: AccountType::Income,
+                    },
+                    opening_date: date! {2012-04-12},
+                    currency: "GBP".to_string(),
+                },
+                Account {
+                    id: AccountId {
+                        name: "AccountD".to_string(),
+                        type_: AccountType::Income,
+                    },
+                    opening_date: date! {2012-04-12},
+                    currency: "GBP".to_string(),
+                },
             ],
             transactions: vec![Transaction {
-                date: date! {2012-04-21},
+                _date: date! {2012-04-21},
                 _description: "transaction 1".to_string(),
+                balance: (50).into(),
                 postings: vec![
-                    Posting {
+                    Posting::Regular(RegularPosting {
                         account_id: AccountId {
                             name: "AccountA".to_string(),
                             type_: AccountType::Income,
                         },
-                        amount: Decimal::ONE,
+                        amount: 100.into(),
                         currency: "GBP".to_string(),
-                        converter: None,
-                    },
-                    Posting {
+                    }),
+                    Posting::Conversion(ConversionPosting {
                         account_id: AccountId {
                             name: "AccountB".to_string(),
                             type_: AccountType::Income,
                         },
-                        amount: Decimal::ONE,
-                        currency: "USD".to_string(),
-                        converter: Some(CurrencyConverter {
-                            currency: "GBP".to_string(),
-                            rate: Decimal::ONE,
-                        }),
-                    },
+                        account_amount: (-50).into(),
+                        account_currency: "USD".to_string(),
+                        rate: Decimal::ONE,
+                        tx_currency: "GBP".to_string(),
+                    }),
+                    Posting::Auto(AccountId {
+                        name: "AccountD".to_string(),
+                        type_: AccountType::Income,
+                    }),
                 ],
-                currency: Some("GBP".to_string()),
             }],
         }
     }
