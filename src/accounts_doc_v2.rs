@@ -40,15 +40,8 @@ impl<'a> Iterator for AccountBalances<'a> {
     }
 }
 
-/// Used in [`ConversionPosting`] to convert an account currency amount to a transaction currency
-/// amount.
-#[derive(Debug)]
-pub struct CurrencyConverter {
-    pub(crate) currency: String,
-    pub(crate) rate: Decimal,
-}
-
-/// Represents a regular beancount posting, which takes the form:
+/// Represents a regular beancount posting, where the account currency and the transaction currency
+/// are the same. Regular postings take the form:
 /// ```beancount
 /// Assets:BankChecking     1000.00 GBP
 /// ```
@@ -66,13 +59,14 @@ pub struct RegularPosting {
 /// ```
 #[derive(Debug)]
 pub struct ConversionPosting {
-    pub(crate) base: RegularPosting,
-    pub(crate) converter: CurrencyConverter,
+    pub(crate) account_id: AccountId,
+    pub(crate) account_amount: Decimal,
+    pub(crate) account_currency: String,
+    pub(crate) rate: Decimal,
+    pub(crate) tx_currency: String,
 }
 
-/// A transaction posting. The currency should match the currency of the account with id `account_id`
-/// when calling [`AccountsDocument::add_transaction`]. A `converter` is required when the posting is
-/// included in a transaction with a different currency to the posting's currency.
+/// Represents the three different types of posting.
 #[derive(Debug)]
 pub enum Posting {
     Auto(AccountId),
@@ -80,61 +74,91 @@ pub enum Posting {
     Conversion(ConversionPosting),
 }
 
-/// Posting information for [`PostingV2::Regular`] and [`PostingV2::Conversion`]
+/// Posting information for [`Posting::Regular`] and [`Posting::Conversion`]
 struct PostingInfo {
     account_currency: String,
-    resolved_amount: Decimal,
-    resolved_currency: String,
+    tx_amount: Decimal,
+    tx_currency: String,
 }
 
 impl Posting {
+    /// Returns the [`AccountId`] unless the posting is an auto-posting in which case [`None`]
+    /// is returned.
     pub fn account_id(&self) -> &AccountId {
         match self {
             Posting::Auto(id) => id,
             Posting::Regular(posting) => &posting.account_id,
-            Posting::Conversion(posting) => &posting.base.account_id,
+            Posting::Conversion(posting) => &posting.account_id,
         }
     }
 
-    pub fn amount(&self) -> Option<Decimal> {
+    /// Returns the account amount unless the posting is an auto-posting in which case [`None`]
+    /// is returned.
+    pub fn account_amount(&self) -> Option<Decimal> {
         match self {
             Posting::Auto(_) => None,
             Posting::Regular(posting) => Some(posting.amount),
-            Posting::Conversion(posting) => Some(posting.base.amount),
+            Posting::Conversion(posting) => Some(posting.account_amount),
         }
     }
 
-    /// Returns  [`Some`] containing a [`PostingInfo`] for [`PostingV2::Regular`] and [`PostingV2::Conversion`], Returns [`None`] for a [`PostingV2::Auto`]
+    /// Returns  [`Some`] containing a [`PostingInfo`] for [`Posting::Regular`] and
+    /// [`Posting::Conversion`], Returns [`None`] for a [`Posting::Auto`].
     fn info(&self) -> Option<PostingInfo> {
         match self {
             Posting::Auto(_) => None,
             Posting::Regular(posting) => Some(PostingInfo {
                 account_currency: posting.currency.clone(),
-                resolved_amount: posting.amount,
-                resolved_currency: posting.currency.clone(),
+                tx_amount: posting.amount,
+                tx_currency: posting.currency.clone(),
             }),
             Posting::Conversion(posting) => {
-                let resolved_amount = posting.base.amount * posting.converter.rate;
+                let tx_amount = posting.account_amount * posting.rate;
 
                 Some(PostingInfo {
-                    account_currency: posting.base.currency.clone(),
-                    resolved_amount,
-                    resolved_currency: posting.converter.currency.clone(),
+                    account_currency: posting.account_currency.clone(),
+                    tx_amount,
+                    tx_currency: posting.tx_currency.clone(),
                 })
             }
         }
     }
 }
 
+/// A [`Transaction`] is a collection of [`Posting`]s with some metadata. The following conditions
+/// are guaranteed to be true for all [`Transaction`] instances:
+/// 1. All regular postings have the same currency.
+/// 2. All conversion postings have the same conversion currency and the same currency as regular
+///    postings.
+/// 3. There is at most one auto posting.
+/// 4. The account id in regular postings corresponds to an open account, with the same currency.
+/// 5. The account id in a conversion posting corresponds to an open account with the same (pre
+///    conversion) currency.
+/// 6, The account id in an auto-posting corresponds to an open account, If the transaction
+/// contains other postings then the currency of the account will be the same as the currency of
+/// all regular postings and the converted to currency of all conversion postings.
+/// 7. For transactions with no auto-posting the sum of all amounts (converted amounts in the case
+///    of conversion postings) will be zero i.e. the transaction will be balanced.
+/// It isn't possible to create a [`Transaction`] directly however the
+/// [`AccountsDocument::add_transaction`] method provides an indirect method of creating a
+/// [`Transaction`]. This method guarantees that all the above requirements are satisfied before
+/// creating and adding the transaction to the accounts document.
+///
+/// The order in which [`Posting`]s are passed to the [`AccountsDocument::add_transaction`] is
+/// preserved. This is useful when writing an [`AccountsDocument`] to a file and a particular order
+/// is required.
 #[derive(Debug)]
 pub struct Transaction {
-    date: Date,
+    _date: Date,
     _description: String,
     balance: Decimal, // this can only be non zero if the transaction contains an auto-posting
-    postings: Vec<Posting>, // use a vec to preserve the read order
+    postings: Vec<Posting>, // use a vec to preserve the order
 }
 
 impl Transaction {
+    /// For a given `account` returns the sum of all postings to that account in the account
+    /// currency. If there's an auto-posting to `account` then the posting amount is given by the
+    /// amount required to balance the transaction.
     pub fn balance(&self, account: &AccountId) -> Option<Decimal> {
         let filtered: Vec<&Posting> = self
             .postings
@@ -147,19 +171,14 @@ impl Transaction {
         }
 
         Some(filtered.iter().fold(Decimal::ZERO, |s, p| {
-            s + p.amount().unwrap_or_else(|| -self.balance)
+            s + p.account_amount().unwrap_or_else(|| -self.balance) // NOTE: if there's an auto
+            // posting it's account_currency is guaranteed to be the same as the
+            // transaction_currency.
         }))
     }
 }
 
-/// The error returned by `Transaction::add_posting`.
-#[derive(Error, Debug, PartialEq)]
-pub enum AddPostingError {
-    #[error("currency does not match")]
-    IncorrectCurrency,
-}
-
-/// This is an in memory representation of a text accounts document. The document will preserve
+/// This is an in memory representation of a beancount accounts document. The document will preserve
 /// the order which transactions and postings appear when constructed from a file.
 #[cfg_attr(test, derive(Debug))]
 pub struct AccountsDocument {
@@ -175,8 +194,8 @@ impl AccountsDocument {
         }
     }
 
-    /// Add an account to the document. Returns an error if an account with the same ID
-    /// already exists.
+    /// Add an [`Account`] to the document. Returns an [`OpenAccountError`] if an account with the
+    /// same [`AccountId`] already exists.
     pub fn open_an_account(&mut self, account: Account) -> Result<(), OpenAccountError> {
         if self.accounts.iter().any(|a| a.id == account.id) {
             Err(OpenAccountError::AccountAlreadyExists)
@@ -186,16 +205,8 @@ impl AccountsDocument {
         }
     }
 
-    /// TODO: documentation
-    /// Adds a post to the transaction. If the transaction's currency is set then we check that the
-    /// post resolves to the same currency (i.e. the posting either contains a conversion to the
-    /// transaction currency or has no conversion but is already in the transaction currency). If
-    /// the transaction's currency is not set (i.e. it has no postings) then we set it to the
-    /// posting's resolved currency.
-    /// Add a transaction to the document. The transaction must:
-    /// 1. Be balanced - the sum of all postings must equal zero.
-    /// 2. Every account must be open and in the correct currency.
-    /// If these conditions are not satisfied an error is returned.
+    /// Adds a [`Transaction`] to the document if the [`Transaction`] defined by the arguments is
+    /// valid.
     pub fn add_transaction(
         &mut self,
         date: Date,
@@ -203,7 +214,7 @@ impl AccountsDocument {
         postings: Vec<Posting>,
     ) -> Result<(), AddTransactionError> {
         let mut running_total = Decimal::ZERO;
-        let mut auto_posting: Option<&Posting> = None;
+        let mut auto_posting: Option<(&Posting, &Account)> = None;
         let mut currency: Option<String> = None;
         for posting in &postings {
             let Some(account) = self.find_account(&posting.account_id()) else {
@@ -214,28 +225,36 @@ impl AccountsDocument {
             }
 
             if let Some(post_info) = posting.info() {
-                // We now know this post isn't an auto-post
+                // We now know this posting isn't an auto-posting
                 if account.currency != post_info.account_currency {
-                    return Err(AddTransactionError::IncorrectCurrency);
+                    return Err(AddTransactionError::IncorrectAccountCurrency);
                 }
 
                 match &mut currency {
-                    Some(c) if c == &post_info.resolved_currency => continue,
-                    Some(_) => return Err(AddTransactionError::IncorrectCurrency),
-                    None => currency.insert(post_info.resolved_currency),
+                    Some(c) if c == &post_info.tx_currency => continue,
+                    Some(_) => return Err(AddTransactionError::IncorrectTransactionCurrency),
+                    None => currency.insert(post_info.tx_currency),
                 };
 
-                running_total += post_info.resolved_amount;
+                running_total += post_info.tx_amount;
             } else {
                 if auto_posting.is_some() {
-                    return Err(AddTransactionError::IncorrectCurrency); //TODO: correct error - only one auto posting is allowed
+                    return Err(AddTransactionError::MoreThanOneAutoPosting);
                 }
 
-                let _ = auto_posting.insert(posting);
+                let _ = auto_posting.insert((posting, account));
             }
         }
 
-        if auto_posting.is_none() {
+        if let Some((_, account)) = auto_posting {
+            // We have an auto-posting, we must check that the account posted to has the same
+            // currency as the transaction currency. If there is no transaction currency (which can
+            // happen if this is the only posting), then the transaction currency **is** the
+            // posting currency so all is good.
+            if currency.is_some_and(|c| c != account.currency) {
+                return Err(AddTransactionError::IncorrectTransactionCurrency);
+            }
+        } else {
             // If there is no auto-posting then the tx must balance
             if running_total != Decimal::ZERO {
                 return Err(AddTransactionError::NotBalanced);
@@ -243,7 +262,7 @@ impl AccountsDocument {
         };
 
         self.transactions.push(Transaction {
-            date,
+            _date: date,
             _description: description,
             balance: running_total,
             postings,
@@ -251,37 +270,6 @@ impl AccountsDocument {
 
         Ok(())
     }
-
-    /// Add a transaction to the document. The transaction must:
-    /// 1. Be balanced - the sum of all postings must equal zero.
-    /// 2. Every account must be open and in the correct currency.
-    /// If these conditions are not satisfied an error is returned.
-    // pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), AddTransactionError> {
-    //     // TODO: what if an account is opened later which is dated before a transaction (causing
-    //     // the transaction to fail when it (arguably) should succeed?
-    //
-    //     let mut running_total = Decimal::ZERO;
-    //     for posting in &transaction.postings {
-    //         let Some(account) = self.find_account(&posting.account_id) else {
-    //             return Err(AddTransactionError::AccountNotFound);
-    //         };
-    //         if transaction.date < account.opening_date {
-    //             return Err(AddTransactionError::AccountNotOpen);
-    //         }
-    //         if account.currency != posting.currency {
-    //             return Err(AddTransactionError::IncorrectCurrency);
-    //         }
-    //         running_total += posting.resolved_amount();
-    //     }
-    //
-    //     if running_total != Decimal::ZERO {
-    //         return Err(AddTransactionError::NotBalanced);
-    //     }
-    //
-    //     self.transactions.push(transaction);
-    //
-    //     Ok(())
-    // }
 
     fn find_account(&self, account_id: &AccountId) -> Option<&Account> {
         self.accounts.iter().find(|a| &a.id == account_id)
@@ -291,7 +279,7 @@ impl AccountsDocument {
         self.accounts.iter().any(|a| &a.id == account)
     }
 
-    /// Returns the balance of `account`. Returns `None` if the account doesn't exist.
+    /// Returns the balance of `account`it it exists otherwise returns [`None`].
     pub fn balance(&self, account: &AccountId) -> Option<Decimal> {
         if !self.account_exists(account) {
             return None;
@@ -302,7 +290,7 @@ impl AccountsDocument {
         }))
     }
 
-    /// Returns an iterator over all accounts and balances.
+    /// Returns an [`AccountBalances`] iterator over all accounts.
     pub fn balances(&self) -> AccountBalances {
         AccountBalances {
             accounts_doc: self,
@@ -311,20 +299,24 @@ impl AccountsDocument {
     }
 }
 
-/// The error returned by `AccountsDocument::add_transaction`.
+/// The error returned by [`AccountsDocument::add_transaction`].
 #[derive(Error, Debug, PartialEq)]
 pub enum AddTransactionError {
     #[error("account not found")]
     AccountNotFound,
     #[error("account not open")]
     AccountNotOpen,
-    #[error("incorrect currency")]
-    IncorrectCurrency,
+    #[error("the postings have different transaction currencies")]
+    IncorrectTransactionCurrency,
+    #[error("the account currency is incorect")]
+    IncorrectAccountCurrency,
     #[error("transaction is not balanced")]
     NotBalanced,
+    #[error("only one auto posting is allowed per transaction")]
+    MoreThanOneAutoPosting,
 }
 
-/// The error returned by `AccountsDocument::open_an_account`.
+/// The error returned by [`AccountsDocument::open_an_account`].
 #[derive(Error, Debug, PartialEq)]
 pub enum OpenAccountError {
     #[error("account already exists")]
