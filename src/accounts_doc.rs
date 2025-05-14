@@ -58,6 +58,98 @@ pub struct Posting {
     pub(crate) converter: Option<CurrencyConverter>,
 }
 
+#[derive(Debug)]
+pub struct RegularPosting {
+    pub(crate) account_id: AccountId,
+    pub(crate) amount: Decimal,
+    pub(crate) currency: String,
+}
+
+#[derive(Debug)]
+pub struct ConversionPosting {
+    pub(crate) base: RegularPosting,
+    pub(crate) converter: CurrencyConverter,
+}
+
+#[derive(Debug)]
+pub enum PostingV2 {
+    Auto(AccountId),
+    Regular(RegularPosting),
+    Conversion(ConversionPosting),
+}
+
+/// Posting information for [`PostingV2::Regular`] and [`PostingV2::Conversion`]
+struct PostingInfo {
+    account_currency: String,
+    resolved_amount: Decimal,
+    resolved_currency: String,
+}
+
+impl PostingV2 {
+    pub fn account_id(&self) -> &AccountId {
+        match self {
+            PostingV2::Auto(id) => id,
+            PostingV2::Regular(posting) => &posting.account_id,
+            PostingV2::Conversion(posting) => &posting.base.account_id,
+        }
+    }
+
+    pub fn amount(&self) -> Option<Decimal> {
+        match self {
+            PostingV2::Auto(_) => None,
+            PostingV2::Regular(posting) => Some(posting.amount),
+            PostingV2::Conversion(posting) => Some(posting.base.amount),
+        }
+    }
+
+    /// Returns  [`Some`] containing a [`PostingInfo`] for [`PostingV2::Regular`] and [`PostingV2::Conversion`], Returns [`None`] for a [`PostingV2::Auto`]
+    fn info(&self) -> Option<PostingInfo> {
+        match self {
+            PostingV2::Auto(_) => None,
+            PostingV2::Regular(posting) => Some(PostingInfo {
+                account_currency: posting.currency.clone(),
+                resolved_amount: posting.amount,
+                resolved_currency: posting.currency.clone(),
+            }),
+            PostingV2::Conversion(posting) => {
+                let resolved_amount = posting.base.amount * posting.converter.rate;
+
+                Some(PostingInfo {
+                    account_currency: posting.base.currency.clone(),
+                    resolved_amount,
+                    resolved_currency: posting.converter.currency.clone(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct TransactionV2 {
+    date: Date,
+    _description: String,
+    balance: Decimal, // this can only be non zero if the transaction contains an auto-posting
+    postings: Vec<PostingV2>, // use a vec to preserve the read order
+}
+
+impl TransactionV2 {
+    pub fn balance(&self, account: &AccountId) -> Option<Decimal> {
+        let filtered: Vec<&PostingV2> = self
+            .postings
+            .iter()
+            .filter(|&p| p.account_id() == account)
+            .collect();
+
+        if filtered.is_empty() {
+            return None;
+        }
+
+        Some(filtered.iter().fold(Decimal::ZERO, |s, p| {
+            s + p.amount().unwrap_or_else(|| -self.balance)
+        }))
+    }
+}
+
 impl Posting {
     fn resolved_currency(&self) -> &String {
         self.converter
@@ -150,13 +242,60 @@ impl AccountsDocument {
         }
     }
 
+    pub fn add_transaction_v2(
+        &mut self,
+        date: Date,
+        description: String,
+        postings: Vec<PostingV2>,
+    ) -> Result<(), AddTransactionError> {
+        let mut running_total = Decimal::ZERO;
+        let mut auto_posting: Option<&PostingV2> = None;
+        for posting in &postings {
+            let Some(account) = self.find_account(&posting.account_id()) else {
+                return Err(AddTransactionError::AccountNotFound);
+            };
+            if date < account.opening_date {
+                return Err(AddTransactionError::AccountNotOpen);
+            }
+
+            if let Some(post_info) = posting.info() {
+                if account.currency != post_info.account_currency {
+                    return Err(AddTransactionError::IncorrectCurrency);
+                }
+                running_total += post_info.resolved_amount;
+            } else {
+                if auto_posting.is_some() {
+                    return Err(AddTransactionError::IncorrectCurrency); //TODO: correct error - only one auto posting is allowed
+                }
+
+                auto_posting.insert(posting);
+            }
+        }
+
+        if auto_posting.is_none() {
+            // If there is no auto-posting then the tx must balance
+            if running_total != Decimal::ZERO {
+                return Err(AddTransactionError::NotBalanced);
+            }
+        };
+
+        // self.transactions.push(TransactionV2 {
+        //     date,
+        //     _description: description,
+        //     balance: running_total,
+        //     postings,
+        // });
+
+        Ok(())
+    }
+
     /// Add a transaction to the document. The transaction must:
     /// 1. Be balanced - the sum of all postings must equal zero.
     /// 2. Every account must be open and in the correct currency.
     /// If these conditions are not satisfied an error is returned.
     pub fn add_transaction(&mut self, transaction: Transaction) -> Result<(), AddTransactionError> {
-        // TODO: what if an account is added later which is dated before a transaction (causing it
-        // to fail)?
+        // TODO: what if an account is opened later which is dated before a transaction (causing
+        // the transaction to fail when it (arguably) should succeed?
 
         let mut running_total = Decimal::ZERO;
         for posting in &transaction.postings {
