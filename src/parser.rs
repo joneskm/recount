@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use crate::{
-    accounts_doc::{Account, AccountsDocument, CurrencyConverter, Posting, Transaction},
+    accounts_doc::{Account, AccountsDocument, ConversionPosting, Posting, RegularPosting},
     tokenizer::{Token, TokenKind, TokenizeError},
     types::AccountId,
 };
@@ -159,7 +159,7 @@ pub fn parse(
                     column
                 );
 
-                let mut transaction = Transaction::new(date.parse().unwrap(), "todo"); // TODO:unwrap + description
+                let mut postings = vec![];
 
                 'posts_loop: while let Some(token) = tokenizer.next().transpose()? {
                     if token.kind == TokenKind::Newline {
@@ -191,15 +191,11 @@ pub fn parse(
                             // This posting has no conversion, we can add it to the transaction
                             // and move on.
 
-                            transaction
-                                .add_posting(Posting {
-                                    account_id,
-                                    amount: amount.amount,
-                                    currency: amount.currency,
-                                    converter: None,
-                                })
-                                .unwrap(); // TODO: unwrap
-
+                            postings.push(Posting::Regular(RegularPosting {
+                                account_id,
+                                amount: amount.amount,
+                                currency: amount.currency,
+                            }));
                             continue;
                         }
                         Some(Token {
@@ -223,50 +219,45 @@ pub fn parse(
                                         column: token.column,
                                     });
                                 }
-                                transaction
-                                    .add_posting(Posting {
-                                        account_id,
-                                        amount: amount.amount,
-                                        currency: amount.currency,
-                                        converter: Some(CurrencyConverter {
-                                            currency: conversion.currency,
-                                            rate: conversion.amount,
-                                        }),
-                                    })
-                                    .unwrap(); // TODO: unwrap
+                                postings.push(Posting::Conversion(ConversionPosting {
+                                    account_id,
+                                    account_amount: amount.amount,
+                                    account_currency: amount.currency,
+                                    tx_currency: conversion.currency,
+                                    rate: conversion.amount,
+                                }));
 
                                 continue;
                             } else {
                                 // We've reached the end of the file. This is OK since we've parsed
                                 // a complete posting.
-                                //
-                                transaction
-                                    .add_posting(Posting {
-                                        account_id,
-                                        amount: amount.amount,
-                                        currency: amount.currency,
-                                        converter: Some(CurrencyConverter {
-                                            currency: conversion.currency,
-                                            rate: conversion.amount,
-                                        }),
-                                    })
-                                    .unwrap(); // TODO: unwrap
-                                accounts_doc.add_transaction(transaction).unwrap(); //TODO: unwrap
+
+                                postings.push(Posting::Conversion(ConversionPosting {
+                                    account_id,
+                                    account_amount: amount.amount,
+                                    account_currency: amount.currency,
+                                    tx_currency: conversion.currency,
+                                    rate: conversion.amount,
+                                }));
+
+                                accounts_doc
+                                    .add_transaction(date.parse().unwrap(), "todo", postings)
+                                    .unwrap(); //TODO: unwraps + tx description
                                 break 'tx_open_loop;
                             };
                         }
                         None => {
                             // We've reached the end of the file. This is OK since we've parsed a
                             // complete posting.
-                            transaction
-                                .add_posting(Posting {
-                                    account_id,
-                                    amount: amount.amount,
-                                    currency: amount.currency,
-                                    converter: None,
-                                })
-                                .unwrap(); // TODO: unwrap
-                            accounts_doc.add_transaction(transaction).unwrap(); //TODO: unwrap
+
+                            postings.push(Posting::Regular(RegularPosting {
+                                account_id,
+                                amount: amount.amount,
+                                currency: amount.currency,
+                            }));
+                            accounts_doc
+                                .add_transaction(date.parse().unwrap(), "todo", postings)
+                                .unwrap(); //TODO: tx description + unwraps
                             break 'tx_open_loop;
                         }
                         _ => {
@@ -278,7 +269,9 @@ pub fn parse(
                         }
                     }
                 }
-                accounts_doc.add_transaction(transaction).unwrap(); //TODO: unwrap
+                accounts_doc
+                    .add_transaction(date.parse().unwrap(), "todo", postings)
+                    .unwrap(); //TODO: unwraps + description
             }
             _ => {
                 // `None` (end of file) or any other token (open or create transaction are covered by the match
