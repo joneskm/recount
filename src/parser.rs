@@ -175,94 +175,125 @@ pub fn parse(
                         });
                     };
 
-                    let (amount, line, column) = expect_token!(
-                        tokenizer,
-                        TokenKind::Amount(amount) => amount,
-                        "expected amount",
-                        line,
-                        column
-                    );
-
                     match tokenizer.next().transpose()? {
                         Some(Token {
                             kind: TokenKind::Newline,
                             ..
                         }) => {
-                            // This posting has no conversion, we can add it to the transaction
+                            // This is an auto-posting we can add it to the postings list
                             // and move on.
 
-                            postings.push(Posting::Regular(RegularPosting {
-                                account_id,
-                                amount: amount.amount,
-                                currency: amount.currency,
-                            }));
+                            postings.push(Posting::Auto(account_id));
                             continue;
-                        }
-                        Some(Token {
-                            kind: TokenKind::At,
-                            line,
-                            column,
-                        }) => {
-                            let (conversion, _, _) = expect_token!(
-                                tokenizer,
-                                TokenKind::Amount(conversion) => conversion,
-                                "expected amount",
-                                line,
-                                column
-                            );
-
-                            if let Some(token) = tokenizer.next().transpose()? {
-                                if token.kind != TokenKind::Newline {
-                                    return Err(ParseError {
-                                        msg: "expected newline".to_string(),
-                                        line: token.line,
-                                        column: token.column,
-                                    });
-                                }
-                                postings.push(Posting::Conversion(ConversionPosting {
-                                    account_id,
-                                    account_amount: amount.amount,
-                                    account_currency: amount.currency,
-                                    tx_currency: conversion.currency,
-                                    rate: conversion.amount,
-                                }));
-
-                                continue;
-                            } else {
-                                // We've reached the end of the file. This is OK since we've parsed
-                                // a complete posting.
-
-                                postings.push(Posting::Conversion(ConversionPosting {
-                                    account_id,
-                                    account_amount: amount.amount,
-                                    account_currency: amount.currency,
-                                    tx_currency: conversion.currency,
-                                    rate: conversion.amount,
-                                }));
-
-                                accounts_doc
-                                    .add_transaction(date.parse().unwrap(), "todo", postings)
-                                    .unwrap(); //TODO: unwraps + tx description
-                                break 'tx_open_loop;
-                            };
                         }
                         None => {
                             // We've reached the end of the file. This is OK since we've parsed a
                             // complete posting.
 
-                            postings.push(Posting::Regular(RegularPosting {
-                                account_id,
-                                amount: amount.amount,
-                                currency: amount.currency,
-                            }));
+                            postings.push(Posting::Auto(account_id));
+
                             accounts_doc
                                 .add_transaction(date.parse().unwrap(), "todo", postings)
                                 .unwrap(); //TODO: tx description + unwraps
                             break 'tx_open_loop;
                         }
+                        Some(Token {
+                            kind: TokenKind::Amount(amount),
+                            ..
+                        }) => {
+                            match tokenizer.next().transpose()? {
+                                Some(Token {
+                                    kind: TokenKind::Newline,
+                                    ..
+                                }) => {
+                                    // This posting has no conversion, we can add it to the postings list
+                                    // and move on.
+
+                                    postings.push(Posting::Regular(RegularPosting {
+                                        account_id,
+                                        amount: amount.amount,
+                                        currency: amount.currency,
+                                    }));
+                                    continue;
+                                }
+                                Some(Token {
+                                    kind: TokenKind::At,
+                                    line,
+                                    column,
+                                }) => {
+                                    let (conversion, _, _) = expect_token!(
+                                        tokenizer,
+                                        TokenKind::Amount(conversion) => conversion,
+                                        "expected amount",
+                                        line,
+                                        column
+                                    );
+
+                                    if let Some(token) = tokenizer.next().transpose()? {
+                                        if token.kind != TokenKind::Newline {
+                                            return Err(ParseError {
+                                                msg: "expected newline".to_string(),
+                                                line: token.line,
+                                                column: token.column,
+                                            });
+                                        }
+                                        postings.push(Posting::Conversion(ConversionPosting {
+                                            account_id,
+                                            account_amount: amount.amount,
+                                            account_currency: amount.currency,
+                                            tx_currency: conversion.currency,
+                                            rate: conversion.amount,
+                                        }));
+
+                                        continue;
+                                    } else {
+                                        // We've reached the end of the file. This is OK since we've parsed
+                                        // a complete posting.
+
+                                        postings.push(Posting::Conversion(ConversionPosting {
+                                            account_id,
+                                            account_amount: amount.amount,
+                                            account_currency: amount.currency,
+                                            tx_currency: conversion.currency,
+                                            rate: conversion.amount,
+                                        }));
+
+                                        accounts_doc
+                                            .add_transaction(
+                                                date.parse().unwrap(),
+                                                "todo",
+                                                postings,
+                                            )
+                                            .unwrap(); //TODO: unwraps + tx description
+                                        break 'tx_open_loop;
+                                    };
+                                }
+                                None => {
+                                    // We've reached the end of the file. This is OK since we've parsed a
+                                    // complete posting.
+
+                                    postings.push(Posting::Regular(RegularPosting {
+                                        account_id,
+                                        amount: amount.amount,
+                                        currency: amount.currency,
+                                    }));
+                                    accounts_doc
+                                        .add_transaction(date.parse().unwrap(), "todo", postings)
+                                        .unwrap(); //TODO: tx description + unwraps
+                                    break 'tx_open_loop;
+                                }
+                                _ => {
+                                    return Err(ParseError {
+                                        msg: "expected newline, end of file or @".to_string(),
+                                        line,
+                                        column,
+                                    });
+                                }
+                            }
+                        }
                         _ => {
                             return Err(ParseError {
-                                msg: "expected newline, end of file or @".to_string(),
+                                msg: "expected newline, end of file or an amount".to_string(),
                                 line,
                                 column,
                             });
@@ -360,7 +391,7 @@ mod tests {
         }));
         add_post_tokens(
             &mut tokens,
-            "6.45".parse().expect("hard coded value will parse"),
+            "7.45".parse().expect("hard coded value will parse"),
             AccountType::Asset,
             "another account",
             "GBP",
@@ -391,6 +422,12 @@ mod tests {
             "2".parse().expect("hard coded value will parse"),
             "GBP",
         );
+        tokens.push(Ok(Token {
+            kind: TokenKind::Newline,
+            line: 0,
+            column: 0,
+        }));
+        add_auto_posting_tokens(&mut tokens, AccountType::Asset, "account name");
 
         let accts = parse(tokens).expect("the test token sequence is valid");
 
@@ -434,7 +471,7 @@ mod tests {
                     type_: AccountType::Asset,
                 },
                 Amount {
-                    amount: "-3.45".parse().expect("hard coded value will parse"),
+                    amount: "-4.45".parse().expect("hard coded value will parse"),
                     currency: "GBP".to_string(),
                 }
             ))
@@ -448,7 +485,7 @@ mod tests {
                     type_: AccountType::Asset,
                 },
                 Amount {
-                    amount: "6.45".parse().expect("hard coded value will parse"),
+                    amount: "7.45".parse().expect("hard coded value will parse"),
                     currency: "GBP".to_string(),
                 }
             ))
@@ -559,6 +596,21 @@ mod tests {
         ];
 
         tokens.append(&mut open);
+    }
+
+    fn add_auto_posting_tokens(
+        tokens: &mut Vec<Result<Token, TokenizeError>>,
+        account_type: AccountType,
+        account_name: impl Into<String>,
+    ) {
+        tokens.push(Ok(Token {
+            kind: TokenKind::Account(crate::types::AccountId {
+                type_: account_type,
+                name: account_name.into(),
+            }),
+            line: 0,
+            column: 0,
+        }));
     }
 
     fn add_conversion_post_tokens(
