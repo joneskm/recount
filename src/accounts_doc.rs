@@ -1,8 +1,12 @@
 use date::Date;
 use rust_decimal::Decimal;
+use rust_decimal::dec;
 use thiserror::Error;
 
 use crate::types::{AccountId, Amount};
+
+// Transactions can be out of balance by a maximum of this amount (this is inline with Beancount)
+const TOLERANCE: Decimal = dec!(0.005);
 
 /// Represents an account in the [`AccountsDocument`].
 #[derive(Debug)]
@@ -256,7 +260,7 @@ impl AccountsDocument {
             }
         } else {
             // If there is no auto-posting then the tx must balance
-            if running_total != Decimal::ZERO {
+            if running_total.abs() > TOLERANCE {
                 return Err(AddTransactionError::NotBalanced);
             }
         };
