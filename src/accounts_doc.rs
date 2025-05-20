@@ -138,11 +138,12 @@ impl Posting {
 /// 4. The account id in regular postings corresponds to an open account, with the same currency.
 /// 5. The account id in a conversion posting corresponds to an open account with the same (pre
 ///    conversion) currency.
-/// 6, The account id in an auto-posting corresponds to an open account, If the transaction
-/// contains other postings then the currency of the account will be the same as the currency of
-/// all regular postings and the converted to currency of all conversion postings.
+/// 6. The account id in an auto-posting corresponds to an open account, If the transaction
+///    contains other postings then the currency of the account will be the same as the currency of
+///    all regular postings and the converted to currency of all conversion postings.
 /// 7. For transactions with no auto-posting the sum of all amounts (converted amounts in the case
 ///    of conversion postings) will be zero i.e. the transaction will be balanced.
+///
 /// It isn't possible to create a [`Transaction`] directly however the
 /// [`AccountsDocument::add_transaction`] method provides an indirect method of creating a
 /// [`Transaction`]. This method guarantees that all the above requirements are satisfied before
@@ -190,6 +191,7 @@ pub struct AccountsDocument {
     transactions: Vec<Transaction>,
 }
 
+#[allow(clippy::new_without_default)] // `new` is more idiomatic than `default` for initializing an empty `AccountsDocument`
 impl AccountsDocument {
     pub fn new() -> AccountsDocument {
         AccountsDocument {
@@ -221,7 +223,7 @@ impl AccountsDocument {
         let mut auto_posting: Option<(&Posting, &Account)> = None;
         let mut currency: Option<String> = None;
         for posting in &postings {
-            let Some(account) = self.find_account(&posting.account_id()) else {
+            let Some(account) = self.find_account(posting.account_id()) else {
                 return Err(AddTransactionError::AccountNotFound);
             };
             if date < account.opening_date {
