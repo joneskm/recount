@@ -113,7 +113,7 @@ pub fn parse(
                             type_: account.type_,
                         },
                         currency,
-                        opening_date: date.parse().unwrap(), //TODO: unwrap
+                        opening_date: date,
                     })
                     .map_err(|_| ParseError {
                         msg: "account already exists".to_string(),
@@ -193,8 +193,8 @@ pub fn parse(
                             postings.push(Posting::Auto(account_id));
 
                             accounts_doc
-                                .add_transaction(date.parse().unwrap(), "todo", postings)
-                                .unwrap(); //TODO: tx description + unwraps
+                                .add_transaction(date, "todo", postings)
+                                .unwrap(); //TODO: tx description + unwrap
                             break 'tx_open_loop;
                         }
                         Some(Token {
@@ -259,12 +259,8 @@ pub fn parse(
                                         }));
 
                                         accounts_doc
-                                            .add_transaction(
-                                                date.parse().unwrap(),
-                                                "todo",
-                                                postings,
-                                            )
-                                            .unwrap(); //TODO: unwraps + tx description
+                                            .add_transaction(date, "todo", postings)
+                                            .unwrap(); //TODO: unwrap + tx description
                                         break 'tx_open_loop;
                                     };
                                 }
@@ -278,8 +274,8 @@ pub fn parse(
                                         currency: amount.currency,
                                     }));
                                     accounts_doc
-                                        .add_transaction(date.parse().unwrap(), "todo", postings)
-                                        .unwrap(); //TODO: tx description + unwraps
+                                        .add_transaction(date, "todo", postings)
+                                        .unwrap(); //TODO: tx description + unwrap
                                     break 'tx_open_loop;
                                 }
                                 _ => {
@@ -301,8 +297,8 @@ pub fn parse(
                     }
                 }
                 accounts_doc
-                    .add_transaction(date.parse().unwrap(), "todo", postings)
-                    .unwrap(); //TODO: unwraps + description
+                    .add_transaction(date, "todo", postings)
+                    .unwrap(); //TODO: unwrap + description
             }
             _ => {
                 // `None` (end of file) or any other token (open or create transaction are covered by the match
@@ -322,7 +318,7 @@ pub fn parse(
 
 #[cfg(test)]
 mod tests {
-    use date::date;
+    use date::{Date, date};
     use rust_decimal::Decimal;
 
     use crate::{types::AccountType, types::Amount};
@@ -344,7 +340,7 @@ mod tests {
         }));
         add_open_account_tokens(
             &mut tokens,
-            "1912-01-12",
+            date! {1912-01-12},
             AccountType::Asset,
             "account name",
             "GBP",
@@ -356,7 +352,7 @@ mod tests {
         }));
         add_open_account_tokens(
             &mut tokens,
-            "1912-01-12",
+            date! {1912-01-12},
             AccountType::Asset,
             "another account",
             "GBP",
@@ -368,7 +364,7 @@ mod tests {
         }));
         add_open_account_tokens(
             &mut tokens,
-            "1912-01-12",
+            date! {1912-01-12},
             AccountType::Asset,
             "yet another account",
             "EUR",
@@ -383,7 +379,7 @@ mod tests {
             line: 0,
             column: 0,
         }));
-        add_tx_declaration_tokens(&mut tokens, "1912-01-12");
+        add_tx_declaration_tokens(&mut tokens, date! {1912-01-12});
         tokens.push(Ok(Token {
             kind: TokenKind::Newline,
             line: 0,
@@ -510,14 +506,14 @@ mod tests {
 
     fn add_open_account_tokens(
         tokens: &mut Vec<Result<Token, TokenizeError>>,
-        date: impl Into<String>,
+        date: Date,
         account_type: AccountType,
         account_name: impl Into<String>,
         currency: impl Into<String>,
     ) {
         let mut open = vec![
             Ok(Token {
-                kind: TokenKind::Date(date.into()),
+                kind: TokenKind::Date(date),
                 line: 0,
                 column: 0,
             }),
@@ -544,13 +540,10 @@ mod tests {
         tokens.append(&mut open);
     }
 
-    fn add_tx_declaration_tokens(
-        tokens: &mut Vec<Result<Token, TokenizeError>>,
-        date: impl Into<String>,
-    ) {
+    fn add_tx_declaration_tokens(tokens: &mut Vec<Result<Token, TokenizeError>>, date: Date) {
         let mut tx_declare = vec![
             Ok(Token {
-                kind: TokenKind::Date(date.into()),
+                kind: TokenKind::Date(date),
                 line: 0,
                 column: 0,
             }),

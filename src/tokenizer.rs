@@ -1,5 +1,6 @@
 use std::sync::LazyLock;
 
+use date::Date;
 use regex::Regex;
 use rust_decimal::prelude::Zero;
 
@@ -70,7 +71,7 @@ impl std::error::Error for TokenizeError {}
 /// The kind of [`Token`].
 #[derive(Debug, PartialEq)]
 pub enum TokenKind {
-    Date(String),
+    Date(Date),
     Amount(Amount),
     DirectiveOpen,
     DirectivePostTx,
@@ -95,6 +96,7 @@ pub struct Token {
 /// # Examples
 ///
 /// ```
+/// use date::date;
 /// use recount::{types::{AccountId, AccountType::Equity}, tokenizer::{Tokenizer, TokenKind, Token, TokenizeError}};
 ///
 ///
@@ -105,7 +107,7 @@ pub struct Token {
 ///        assert_eq!(
 ///            vec![
 ///                Token {
-///                    kind: TokenKind::Date("2023-02-01".to_string()),
+///                    kind: TokenKind::Date(date!{2023-02-01}),
 ///                    line: 1,
 ///                    column: 1
 ///                },
@@ -246,9 +248,12 @@ impl Tokenizer {
         }) {
             let (line, column) = self.current_line_column();
             self.cursor += date.end();
-            let date = date.as_str();
+            let date = date
+                .as_str()
+                .parse()
+                .expect("the regex guarantees that parsing won't fail");
             Ok(Some(Token {
-                kind: TokenKind::Date(date.to_string()),
+                kind: TokenKind::Date(date),
                 line,
                 column,
             }))
@@ -397,6 +402,7 @@ impl Tokenizer {
 mod tests {
     use super::*;
     use crate::types::AccountType;
+    use date::date;
 
     #[test]
     fn tmp() {
@@ -409,7 +415,7 @@ mod tests {
         assert_eq!(
             vec![
                 Token {
-                    kind: TokenKind::Date("2023-02-01".to_string()),
+                    kind: TokenKind::Date(date! {2023-02-01}),
                     line: 1,
                     column: 1
                 },
@@ -476,7 +482,7 @@ mod tests {
         assert_eq!(
             tokenizer.next_token(),
             Ok(Some(Token {
-                kind: TokenKind::Date("2023-02-01".to_string()),
+                kind: TokenKind::Date(date! {2023-02-01}),
                 line: 3,
                 column: 1,
             }))
@@ -560,7 +566,7 @@ mod tests {
         assert_eq!(
             tokenizer.next_token(),
             Ok(Some(Token {
-                kind: TokenKind::Date("2023-02-03".to_string()),
+                kind: TokenKind::Date(date! {2023-02-03}),
                 line: 8,
                 column: 1
             }))
